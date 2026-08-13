@@ -1,0 +1,10 @@
+[package]
+name = "millionsend"
+version = "0.0.1"
+edition = "2021"
+description = "Official Rust SDK for MillionSend — the open-source email platform. Under active development."
+license = "MIT"
+repository = "https://github.com/MillionSend/millionsend-rust"
+homepage = "https://github.com/MillionSend"
+keywords = ["email", "millionsend", "ses"]
+categories = ["email"]
