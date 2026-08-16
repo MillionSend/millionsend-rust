@@ -21,8 +21,8 @@ impl Default for Recipients {
     }
 }
 
-impl<'a> From<&'a str> for Recipients {
-    fn from(value: &'a str) -> Self {
+impl From<&str> for Recipients {
+    fn from(value: &str) -> Self {
         Recipients::One(value.to_string())
     }
 }
@@ -39,14 +39,14 @@ impl From<Vec<String>> for Recipients {
     }
 }
 
-impl<'a> From<Vec<&'a str>> for Recipients {
-    fn from(value: Vec<&'a str>) -> Self {
+impl From<Vec<&str>> for Recipients {
+    fn from(value: Vec<&str>) -> Self {
         Recipients::Many(value.into_iter().map(String::from).collect())
     }
 }
 
-impl<'a, const N: usize> From<[&'a str; N]> for Recipients {
-    fn from(value: [&'a str; N]) -> Self {
+impl<const N: usize> From<[&str; N]> for Recipients {
+    fn from(value: [&str; N]) -> Self {
         Recipients::Many(value.iter().map(|s| s.to_string()).collect())
     }
 }
@@ -259,8 +259,8 @@ impl ContactAddress {
     }
 }
 
-impl<'a> From<&'a str> for ContactAddress {
-    fn from(value: &'a str) -> Self {
+impl From<&str> for ContactAddress {
+    fn from(value: &str) -> Self {
         ContactAddress::id(value)
     }
 }
@@ -271,8 +271,8 @@ impl From<String> for ContactAddress {
     }
 }
 
-impl<'a> From<&'a String> for ContactAddress {
-    fn from(value: &'a String) -> Self {
+impl From<&String> for ContactAddress {
+    fn from(value: &String) -> Self {
         ContactAddress::id(value.clone())
     }
 }
