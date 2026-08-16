@@ -1,6 +1,2 @@
-.DS_Store
-vendor/
-target/
-*.gem
-Gemfile.lock
+/target
 Cargo.lock
