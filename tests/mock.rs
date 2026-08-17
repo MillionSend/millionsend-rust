@@ -139,88 +139,31 @@ async fn batch_send_posts_bare_array_with_idempotency() {
     assert_eq!(res.data.len(), 2);
 }
 
-// ---- audiences -----------------------------------------------------------
-
-#[tokio::test]
-async fn audiences_cover_create_get_list_delete() {
-    let server = MockServer::start().await;
-    Mock::given(method("POST"))
-        .and(path("/audiences"))
-        .and(body_json(json!({ "name": "Users" })))
-        .respond_with(ok_json(
-            json!({ "object": "audience", "id": "a1", "name": "Users" }),
-        ))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/audiences/a1"))
-        .respond_with(ok_json(json!({
-            "object": "audience", "id": "a1", "name": "Users",
-            "created_at": "2026-01-01T00:00:00Z"
-        })))
-        .mount(&server)
-        .await;
-    Mock::given(method("GET"))
-        .and(path("/audiences"))
-        .and(query_param("limit", "10"))
-        .respond_with(ok_json(
-            json!({ "object": "list", "data": [], "has_more": false }),
-        ))
-        .mount(&server)
-        .await;
-    Mock::given(method("DELETE"))
-        .and(path("/audiences/a1"))
-        .respond_with(ok_json(
-            json!({ "object": "audience", "id": "a1", "deleted": true }),
-        ))
-        .mount(&server)
-        .await;
-
-    let ms = MillionSend::with_base_url("ms_test", server.uri());
-    assert_eq!(ms.audiences.create("Users").await.unwrap().id, "a1");
-    assert_eq!(ms.audiences.get("a1").await.unwrap().name, "Users");
-    let options = ListOptions {
-        limit: Some(10),
-        ..Default::default()
-    };
-    assert!(!ms.audiences.list(Some(&options)).await.unwrap().has_more);
-    assert!(ms.audiences.delete("a1").await.unwrap().deleted);
-}
-
 // ---- contacts ------------------------------------------------------------
 
 #[tokio::test]
-async fn contacts_create_scoped_and_top_level() {
+async fn contacts_create_posts_top_level() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))
-        .and(path("/audiences/a1/contacts"))
+        .and(path("/contacts"))
         .and(body_json(
             json!({ "email": "c@x.dev", "first_name": "Ada" }),
         ))
         .respond_with(ok_json(json!({ "object": "contact", "id": "c1" })))
         .mount(&server)
         .await;
-    Mock::given(method("POST"))
-        .and(path("/contacts"))
-        .and(body_json(json!({ "email": "c@x.dev" })))
-        .respond_with(ok_json(json!({ "object": "contact", "id": "c2" })))
-        .mount(&server)
-        .await;
 
     let ms = MillionSend::with_base_url("ms_test", server.uri());
-    let scoped = CreateContactOptions {
-        audience_id: Some("a1".into()),
+    let contact = CreateContactOptions {
         email: "c@x.dev".into(),
         first_name: Some("Ada".into()),
         ..Default::default()
     };
-    assert_eq!(ms.contacts.create(&scoped).await.unwrap().id, "c1");
-    let top = CreateContactOptions::new("c@x.dev");
-    assert_eq!(ms.contacts.create(&top).await.unwrap().id, "c2");
+    assert_eq!(ms.contacts.create(&contact).await.unwrap().id, "c1");
 }
 
 #[tokio::test]
-async fn contacts_address_by_id_email_and_scoped_id() {
+async fn contacts_address_by_id_and_email() {
     let server = MockServer::start().await;
     let contact = |id: &str| {
         json!({
@@ -242,11 +185,6 @@ async fn contacts_address_by_id_email_and_scoped_id() {
         .respond_with(ok_json(contact("c1")))
         .mount(&server)
         .await;
-    Mock::given(method("GET"))
-        .and(path("/audiences/a1/contacts/c1"))
-        .respond_with(ok_json(contact("c1")))
-        .mount(&server)
-        .await;
 
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     assert_eq!(ms.contacts.get("c1").await.unwrap().id, "c1");
@@ -258,10 +196,6 @@ async fn contacts_address_by_id_email_and_scoped_id() {
             .email,
         "c@x.dev"
     );
-    ms.contacts
-        .get(ContactAddress::id("c1").in_audience("a1"))
-        .await
-        .unwrap();
 }
 
 #[tokio::test]
@@ -286,7 +220,7 @@ async fn contacts_update_sends_only_provided_keys_null_clears() {
 }
 
 #[tokio::test]
-async fn contacts_delete_and_list_scoped() {
+async fn contacts_delete_and_list() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
         .and(path_regex(r"^/contacts/c(%40|@)x\.dev$"))
@@ -296,7 +230,7 @@ async fn contacts_delete_and_list_scoped() {
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/audiences/a1/contacts"))
+        .and(path("/contacts"))
         .and(query_param("after", "cur"))
         .respond_with(ok_json(
             json!({ "object": "list", "data": [], "has_more": false }),
@@ -316,7 +250,7 @@ async fn contacts_delete_and_list_scoped() {
         after: Some("cur".into()),
         ..Default::default()
     };
-    ms.contacts.list(Some("a1"), Some(&options)).await.unwrap();
+    ms.contacts.list(Some(&options)).await.unwrap();
 }
 
 #[tokio::test]
@@ -393,7 +327,7 @@ async fn broadcasts_cover_the_full_lifecycle() {
     Mock::given(method("POST"))
         .and(path("/broadcasts"))
         .and(body_json(json!({
-            "audience_id": "a1", "from": "a@x.dev", "subject": "News", "html": "<p>hi</p>"
+            "segment_id": "s1", "from": "a@x.dev", "subject": "News", "html": "<p>hi</p>"
         })))
         .respond_with(ok_json(json!({ "id": "b1" })))
         .mount(&server)
@@ -401,8 +335,8 @@ async fn broadcasts_cover_the_full_lifecycle() {
     Mock::given(method("GET"))
         .and(path("/broadcasts/b1"))
         .respond_with(ok_json(json!({
-            "object": "broadcast", "id": "b1", "name": null, "audience_id": "a1",
-            "segment_id": null, "status": "draft", "created_at": "2026-01-01T00:00:00Z",
+            "object": "broadcast", "id": "b1", "name": null,
+            "segment_id": "s1", "status": "draft", "created_at": "2026-01-01T00:00:00Z",
             "scheduled_at": null, "sent_at": null, "from": "a@x.dev", "subject": "News",
             "reply_to": null, "preview_text": null, "topic_id": null,
             "html": "<p>hi</p>", "text": null
@@ -443,7 +377,7 @@ async fn broadcasts_cover_the_full_lifecycle() {
 
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let create = CreateBroadcastOptions {
-        audience_id: Some("a1".into()),
+        segment_id: Some("s1".into()),
         from: "a@x.dev".into(),
         subject: "News".into(),
         html: Some("<p>hi</p>".into()),
@@ -482,33 +416,31 @@ async fn broadcasts_send_now_posts_empty_object() {
 // ---- segments ------------------------------------------------------------
 
 #[tokio::test]
-async fn segments_cover_create_get_list_update_delete_on_segments2() {
+async fn segments_cover_create_get_list_update_delete() {
     let server = MockServer::start().await;
     let filter = json!({
         "match": "all",
         "conditions": [{ "field": "email", "op": "is_set" }]
     });
     Mock::given(method("POST"))
-        .and(path("/segments2"))
-        .and(body_json(
-            json!({ "name": "Active", "audience_id": "a1", "filter": filter }),
-        ))
+        .and(path("/segments"))
+        .and(body_json(json!({ "name": "Active", "filter": filter })))
         .respond_with(ok_json(json!({
-            "object": "segment", "id": "s1", "name": "Active", "audience_id": "a1",
+            "object": "segment", "id": "s1", "name": "Active",
             "filter": filter, "created_at": "2026-01-01T00:00:00Z"
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/segments2/s1"))
+        .and(path("/segments/s1"))
         .respond_with(ok_json(json!({
-            "object": "segment", "id": "s1", "name": "Active", "audience_id": "a1",
+            "object": "segment", "id": "s1", "name": "Active",
             "filter": filter, "created_at": "2026-01-01T00:00:00Z", "contact_count": 42
         })))
         .mount(&server)
         .await;
     Mock::given(method("GET"))
-        .and(path("/segments2"))
+        .and(path("/segments"))
         .and(query_param("before", "cur"))
         .respond_with(ok_json(
             json!({ "object": "list", "data": [], "has_more": false }),
@@ -516,16 +448,16 @@ async fn segments_cover_create_get_list_update_delete_on_segments2() {
         .mount(&server)
         .await;
     Mock::given(method("PATCH"))
-        .and(path("/segments2/s1"))
+        .and(path("/segments/s1"))
         .and(body_json(json!({ "name": "Renamed" })))
         .respond_with(ok_json(json!({
-            "object": "segment", "id": "s1", "name": "Renamed", "audience_id": "a1",
+            "object": "segment", "id": "s1", "name": "Renamed",
             "filter": filter, "created_at": "2026-01-01T00:00:00Z"
         })))
         .mount(&server)
         .await;
     Mock::given(method("DELETE"))
-        .and(path("/segments2/s1"))
+        .and(path("/segments/s1"))
         .respond_with(ok_json(
             json!({ "object": "segment", "id": "s1", "deleted": true }),
         ))
@@ -535,7 +467,6 @@ async fn segments_cover_create_get_list_update_delete_on_segments2() {
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let create = CreateSegmentOptions {
         name: "Active".into(),
-        audience_id: "a1".into(),
         filter: SegmentFilter {
             match_: SegmentMatch::All,
             conditions: vec![SegmentCondition {

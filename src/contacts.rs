@@ -8,8 +8,8 @@ use crate::types::{
     UpdateContactTopicsResponse,
 };
 
-/// Contacts — addressable by id or email (email wins), scoped to an audience or
-/// top-level. Mirrors Resend's `contacts` resource, plus a nested `topics`.
+/// Contacts — team-global, addressable by id or email (email wins). Mirrors
+/// Resend's `contacts` resource, plus a nested `topics`.
 #[derive(Clone)]
 pub struct Contacts {
     config: Arc<Config>,
@@ -24,20 +24,16 @@ impl Contacts {
         }
     }
 
-    /// `POST /audiences/:audienceId/contacts` (or `POST /contacts` when
-    /// `audience_id` is unset).
+    /// `POST /contacts` — 409 `validation_error` on a duplicate email
+    /// (case-insensitive per team).
     pub async fn create(&self, contact: &CreateContactOptions) -> Result<ContactId> {
-        let segments = match &contact.audience_id {
-            Some(audience_id) => vec!["audiences", audience_id.as_str(), "contacts"],
-            None => vec!["contacts"],
-        };
-        self.config.post(&segments, contact, None).await
+        self.config.post(&["contacts"], contact, None).await
     }
 
-    /// `GET /contacts/:idOrEmail` (audience-scoped when the address carries one).
+    /// `GET /contacts/:idOrEmail`
     pub async fn get(&self, address: impl Into<ContactAddress>) -> Result<Contact> {
         let address = address.into();
-        self.config.get(&contact_segments(&address), &[]).await
+        self.config.get(&["contacts", address.key()], &[]).await
     }
 
     /// `PATCH /contacts/:idOrEmail` — `null` clears a field, omitted leaves it.
@@ -48,7 +44,7 @@ impl Contacts {
     ) -> Result<ContactId> {
         let address = address.into();
         self.config
-            .patch(&contact_segments(&address), changes)
+            .patch(&["contacts", address.key()], changes)
             .await
     }
 
@@ -58,20 +54,12 @@ impl Contacts {
         address: impl Into<ContactAddress>,
     ) -> Result<DeleteContactResponse> {
         let address = address.into();
-        self.config.delete(&contact_segments(&address)).await
+        self.config.delete(&["contacts", address.key()]).await
     }
 
-    /// `GET /audiences/:audienceId/contacts` (or `GET /contacts`).
-    pub async fn list(
-        &self,
-        audience_id: Option<&str>,
-        options: Option<&ListOptions>,
-    ) -> Result<List<ContactListItem>> {
-        let segments = match audience_id {
-            Some(audience_id) => vec!["audiences", audience_id, "contacts"],
-            None => vec!["contacts"],
-        };
-        self.config.get(&segments, &list_query(options)).await
+    /// `GET /contacts`
+    pub async fn list(&self, options: Option<&ListOptions>) -> Result<List<ContactListItem>> {
+        self.config.get(&["contacts"], &list_query(options)).await
     }
 }
 
@@ -90,12 +78,5 @@ impl ContactTopics {
         self.0
             .patch(&["contacts", address.key(), "topics"], topics)
             .await
-    }
-}
-
-fn contact_segments(address: &ContactAddress) -> Vec<&str> {
-    match &address.audience_id {
-        Some(audience_id) => vec!["audiences", audience_id.as_str(), "contacts", address.key()],
-        None => vec!["contacts", address.key()],
     }
 }

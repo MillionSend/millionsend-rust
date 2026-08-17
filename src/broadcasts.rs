@@ -9,8 +9,8 @@ use crate::types::{
     CreateBroadcastOptions, DeleteBroadcastResponse, List, ListOptions, UpdateBroadcastOptions,
 };
 
-/// Broadcasts — a one-off email to an audience or segment. Mirrors Resend's
-/// `broadcasts` resource.
+/// Broadcasts — a one-off email to a segment, a topic's subscribers, or (with
+/// neither set) every contact. Mirrors Resend's `broadcasts` resource.
 #[derive(Clone)]
 pub struct Broadcasts(pub(crate) Arc<Config>);
 

@@ -171,39 +171,12 @@ pub struct BatchResponse {
     pub data: Vec<CreateEmailResponse>,
 }
 
-// ---- audiences -----------------------------------------------------------
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct Audience {
-    pub object: String,
-    pub id: String,
-    pub name: String,
-    pub created_at: Option<String>,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct AudienceListItem {
-    pub id: String,
-    pub name: String,
-    pub created_at: String,
-}
-
-#[derive(Debug, Clone, Deserialize)]
-pub struct DeleteAudienceResponse {
-    pub object: String,
-    pub id: String,
-    pub deleted: bool,
-}
-
 // ---- contacts ------------------------------------------------------------
 
-/// Build with `CreateContactOptions::new(email)`. Set `audience_id` to create
-/// under an audience; leave it `None` for a top-level contact.
+/// Build with `CreateContactOptions::new(email)`. Contacts are team-global;
+/// duplicates (case-insensitive email) are a 409 `validation_error`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateContactOptions {
-    /// Routed into the path, never the body.
-    #[serde(skip_serializing)]
-    pub audience_id: Option<String>,
     pub email: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub first_name: Option<String>,
@@ -224,11 +197,10 @@ impl CreateContactOptions {
     }
 }
 
-/// Address a contact by id or email (email wins when both are set), optionally
-/// scoped to an audience. A bare `&str`/`String` is treated as an id.
+/// Address a contact by id or email (email wins when both are set). A bare
+/// `&str`/`String` is treated as an id.
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub struct ContactAddress {
-    pub audience_id: Option<String>,
     pub id: Option<String>,
     pub email: Option<String>,
 }
@@ -246,11 +218,6 @@ impl ContactAddress {
             email: Some(email.into()),
             ..Default::default()
         }
-    }
-
-    pub fn in_audience(mut self, audience_id: impl Into<String>) -> Self {
-        self.audience_id = Some(audience_id.into());
-        self
     }
 
     /// The path key: email wins over id.
@@ -401,8 +368,7 @@ pub struct DeleteTopicResponse {
 pub struct CreateBroadcastOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
-    pub audience_id: Option<String>,
+    /// Neither `segment_id` nor `topic_id` set = send to all contacts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<String>,
     pub from: String,
@@ -434,8 +400,6 @@ pub struct UpdateBroadcastOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub audience_id: Option<String>,
-    #[serde(skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from: Option<String>,
@@ -460,7 +424,6 @@ pub struct BroadcastId {
 pub struct BroadcastListItem {
     pub id: String,
     pub name: Option<String>,
-    pub audience_id: Option<String>,
     pub segment_id: Option<String>,
     pub status: String,
     pub created_at: String,
@@ -473,7 +436,6 @@ pub struct Broadcast {
     pub object: String,
     pub id: String,
     pub name: Option<String>,
-    pub audience_id: Option<String>,
     pub segment_id: Option<String>,
     pub status: String,
     pub created_at: String,
@@ -528,7 +490,6 @@ pub struct SegmentFilter {
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateSegmentOptions {
     pub name: String,
-    pub audience_id: String,
     pub filter: SegmentFilter,
 }
 
@@ -545,7 +506,6 @@ pub struct Segment {
     pub object: String,
     pub id: String,
     pub name: String,
-    pub audience_id: String,
     pub filter: SegmentFilter,
     pub created_at: String,
     /// Present on `get` (a live count); absent on `create`/`list`/`update`.

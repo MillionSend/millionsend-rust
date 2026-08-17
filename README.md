@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.1"
+millionsend = "0.2"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -101,18 +101,15 @@ ms.batch.send(&[email_a, email_b]).await?;                        // POST /email
 ms.batch.send_with_idempotency_key(&emails, "batch-1").await?;
 ```
 
-### Audiences & contacts
+### Contacts
+
+Contacts are team-global — one record per email address (case-insensitive);
+creating a duplicate is a 409 `validation_error`.
 
 ```rust
 use millionsend::{ContactAddress, CreateContactOptions, ListOptions, UpdateContactOptions};
 
-let audience = ms.audiences.create("Registered users").await?;
-ms.audiences.list(Some(&ListOptions { limit: Some(20), ..Default::default() })).await?;
-ms.audiences.get(&audience.id).await?;
-ms.audiences.delete(&audience.id).await?;
-
 ms.contacts.create(&CreateContactOptions {
-    audience_id: Some(audience.id.clone()),
     email: "ada@acme.dev".into(),
     first_name: Some("Ada".into()),
     ..Default::default()
@@ -120,7 +117,7 @@ ms.contacts.create(&CreateContactOptions {
 
 // Address by id (a bare &str) or email; email wins if both are set.
 ms.contacts.get("contact-id").await?;
-ms.contacts.get(ContactAddress::email("ada@acme.dev").in_audience(&audience.id)).await?;
+ms.contacts.get(ContactAddress::email("ada@acme.dev")).await?;
 
 // null clears a field, omitted leaves it unchanged.
 ms.contacts.update("contact-id", &UpdateContactOptions {
@@ -130,7 +127,7 @@ ms.contacts.update("contact-id", &UpdateContactOptions {
 }).await?;
 
 ms.contacts.delete(ContactAddress::email("ada@acme.dev")).await?;
-ms.contacts.list(Some(&audience.id), None).await?;   // or list(None, None) for top-level
+ms.contacts.list(Some(&ListOptions { limit: Some(20), ..Default::default() })).await?;
 ```
 
 Topic subscriptions (granular unsubscribe):
@@ -157,11 +154,14 @@ ms.topics.delete(&id).await?;
 
 ### Broadcasts
 
+Target a segment (`segment_id`) and/or a topic's subscribers (`topic_id`);
+with neither set, the broadcast goes to every contact.
+
 ```rust
 use millionsend::{CreateBroadcastOptions, UpdateBroadcastOptions};
 
 let broadcast = ms.broadcasts.create(&CreateBroadcastOptions {
-    audience_id: Some(audience.id.clone()),
+    segment_id: Some(segment.id.clone()),
     from: "Acme <news@acme.dev>".into(),
     subject: "Launch".into(),
     html: Some("<p>Hi {{{FIRST_NAME|there}}}</p>".into()),
@@ -181,15 +181,14 @@ ms.broadcasts.delete(&broadcast.id).await?;                // draft only
 
 ### Segments (MillionSend extension)
 
-Dynamic segments are a saved filter over an audience's contacts — a MillionSend
-superset with no Resend equivalent (served at `/segments2`).
+Dynamic segments are a saved filter over the team's contacts — a MillionSend
+superset with no Resend equivalent.
 
 ```rust
 use millionsend::{CreateSegmentOptions, SegmentCondition, SegmentFilter, SegmentMatch};
 
-ms.segments.create(&CreateSegmentOptions {
+let segment = ms.segments.create(&CreateSegmentOptions {
     name: "Pro plan".into(),
-    audience_id: audience.id.clone(),
     filter: SegmentFilter {
         match_: SegmentMatch::All,
         conditions: vec![SegmentCondition {
@@ -219,8 +218,9 @@ Method names and nesting match. Notes:
 
 - **Domains and API keys** are managed in the MillionSend dashboard, not via the
   API — there are no `domains`/`api_keys` resources here.
-- Resend's `segments` is an alias of audiences; MillionSend's `segments` is the
-  distinct dynamic-filter feature. Use `audiences` for a straight port.
+- **No audiences.** Contacts are team-global; use `segments` (saved filters) to
+  target a subset, or a broadcast with no `segment_id`/`topic_id` to reach
+  everyone.
 
 ## License
 

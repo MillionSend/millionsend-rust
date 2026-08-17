@@ -2,8 +2,8 @@
 //! self-hostable, Resend-compatible email API.
 //!
 //! Construct a [`MillionSend`] once and reuse it (it is cheap to [`Clone`]). Each
-//! resource hangs off a public field: `emails`, `batch`, `audiences`,
-//! `contacts`, `topics`, `broadcasts`, `segments`.
+//! resource hangs off a public field: `emails`, `batch`, `contacts`, `topics`,
+//! `broadcasts`, `segments`.
 //!
 //! ```no_run
 //! use millionsend::{MillionSend, SendEmailOptions};
@@ -29,7 +29,6 @@
 //! API's `{ statusCode, name, message }`, [`Error::Http`] a transport failure
 //! (its [`status_code`](Error::status_code) is `None`).
 
-mod audiences;
 mod broadcasts;
 mod contacts;
 mod emails;
@@ -43,7 +42,6 @@ use std::sync::Arc;
 
 use http::Config;
 
-pub use audiences::Audiences;
 pub use broadcasts::Broadcasts;
 pub use contacts::{ContactTopics, Contacts};
 pub use emails::{Batch, Emails};
@@ -59,7 +57,6 @@ const DEFAULT_BASE_URL: &str = "http://localhost:3001";
 pub struct MillionSend {
     pub emails: Emails,
     pub batch: Batch,
-    pub audiences: Audiences,
     pub contacts: Contacts,
     pub topics: Topics,
     pub broadcasts: Broadcasts,
@@ -98,7 +95,6 @@ impl MillionSend {
         MillionSend {
             emails: Emails(config.clone()),
             batch: Batch(config.clone()),
-            audiences: Audiences(config.clone()),
             contacts: Contacts::new(config.clone()),
             topics: Topics(config.clone()),
             broadcasts: Broadcasts(config.clone()),
