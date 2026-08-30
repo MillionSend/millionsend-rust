@@ -90,8 +90,28 @@ impl MillionSend {
         Ok(Self::new(api_key))
     }
 
+    /// Replace the underlying [`reqwest::Client`] (custom timeouts, proxies,
+    /// TLS settings). The default has a 30s request and 10s connect timeout.
+    pub fn with_client(self, client: reqwest::Client) -> Self {
+        Self::from_config(self.config().with_client(client))
+    }
+
+    /// Accept a plain `http://` base URL on a non-loopback host. Off by default
+    /// because the API key travels as a bearer header.
+    pub fn allow_insecure_http(self) -> Self {
+        Self::from_config(self.config().allow_insecure_http())
+    }
+
+    fn config(&self) -> Config {
+        (*self.emails.0).clone()
+    }
+
     fn build(api_key: String, base_url: String) -> Self {
-        let config = Arc::new(Config::new(api_key, base_url));
+        Self::from_config(Config::new(api_key, base_url))
+    }
+
+    fn from_config(config: Config) -> Self {
+        let config = Arc::new(config);
         MillionSend {
             emails: Emails(config.clone()),
             batch: Batch(config.clone()),

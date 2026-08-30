@@ -5,11 +5,47 @@
 
 use millionsend::*;
 use serde_json::json;
+use std::time::Duration;
 use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn ok_json(body: serde_json::Value) -> ResponseTemplate {
     ResponseTemplate::new(200).set_body_json(body)
+}
+
+// ---- transport -----------------------------------------------------------
+
+#[tokio::test]
+async fn refuses_non_loopback_http_unless_allowed() {
+    let ms = MillionSend::with_base_url("ms_test", "http://mail.invalid");
+    let err = ms.emails.get("e1").await.unwrap_err();
+    assert_eq!(err.name(), Some("insecure_base_url"));
+    assert_eq!(err.status_code(), None);
+
+    // Opted in: the request leaves the SDK (and fails at the transport, not the guard).
+    let err = ms.allow_insecure_http().emails.get("e1").await.unwrap_err();
+    assert!(matches!(err, Error::Http(_)), "got {err}");
+}
+
+#[tokio::test]
+async fn with_client_applies_custom_timeout() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/e1"))
+        .respond_with(ok_json(json!({ "id": "e1" })).set_delay(Duration::from_millis(500)))
+        .mount(&server)
+        .await;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let ms = MillionSend::with_base_url("ms_test", server.uri()).with_client(client);
+    let err = ms.emails.get("e1").await.unwrap_err();
+    match err {
+        Error::Http(e) => assert!(e.is_timeout(), "{e}"),
+        other => panic!("expected a timeout, got {other}"),
+    }
 }
 
 // ---- emails --------------------------------------------------------------

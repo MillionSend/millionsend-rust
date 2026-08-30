@@ -59,11 +59,22 @@ let ms = MillionSend::new("ms_123");
 
 // Both from the environment (MILLIONSEND_API_KEY + optional MILLIONSEND_BASE_URL).
 let ms = MillionSend::from_env()?;
+
+// Bring your own reqwest client (proxies, TLS, timeouts). The default has a
+// 30s request timeout and a 10s connect timeout.
+let ms = MillionSend::new("ms_123").with_client(reqwest::Client::new());
+
+// Accept a non-loopback http:// base URL (refused by default).
+let ms = MillionSend::with_base_url("ms_123", "http://10.0.0.5:3001").allow_insecure_http();
 ```
 
 MillionSend is self-hosted, so there is no cloud default — **set the base URL to
 your deployment in production.** Every request carries
 `Authorization: Bearer <api_key>` and a `millionsend-rust/<version>` User-Agent.
+Plain `http://` is only accepted for loopback hosts (`localhost`, `127.0.0.1`, `::1`);
+any other `http://` URL makes every call return `Error::Api` named `insecure_base_url`,
+since the API key is sent as a bearer header. Call `allow_insecure_http()` to talk to a
+non-TLS instance elsewhere (e.g. inside a private network).
 
 ## Error handling
 

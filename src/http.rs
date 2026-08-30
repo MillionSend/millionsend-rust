@@ -1,11 +1,27 @@
 use percent_encoding::{utf8_percent_encode, AsciiSet, NON_ALPHANUMERIC};
-use reqwest::{Client, RequestBuilder};
+use reqwest::{Client, RequestBuilder, Url};
 use serde::{de::DeserializeOwned, Serialize};
 use std::fmt::Write as _;
+use std::time::Duration;
 
 use crate::error::{ApiError, Error, Result};
 
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
+const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
+const REQUEST_TIMEOUT: Duration = Duration::from_secs(30);
+
+/// True for an `http://` URL whose host is not loopback. Unparseable URLs are
+/// left for reqwest to reject.
+fn is_insecure_http_url(raw: &str) -> bool {
+    let Ok(url) = Url::parse(raw) else {
+        return false;
+    };
+    if url.scheme() != "http" {
+        return false;
+    }
+    let host = url.host_str().unwrap_or("").to_ascii_lowercase();
+    !matches!(host.as_str(), "localhost" | "[::1]") && !host.starts_with("127.")
+}
 
 /// The set JS `encodeURIComponent` leaves untouched: encode everything but the
 /// unreserved marks. Keeps path segments (emails contain `@`) wire-identical to
@@ -29,16 +45,34 @@ pub(crate) struct Config {
     base_url: String,
     user_agent: String,
     client: Client,
+    allow_insecure_http: bool,
 }
 
 impl Config {
     pub(crate) fn new(api_key: String, base_url: String) -> Self {
+        // Same panic contract as `Client::new()`: only a broken TLS backend fails here.
+        let client = Client::builder()
+            .timeout(REQUEST_TIMEOUT)
+            .connect_timeout(CONNECT_TIMEOUT)
+            .build()
+            .expect("reqwest client");
         Config {
             api_key,
             base_url: base_url.trim_end_matches('/').to_string(),
             user_agent: format!("millionsend-rust/{SDK_VERSION}"),
-            client: Client::new(),
+            client,
+            allow_insecure_http: false,
         }
+    }
+
+    pub(crate) fn with_client(mut self, client: Client) -> Self {
+        self.client = client;
+        self
+    }
+
+    pub(crate) fn allow_insecure_http(mut self) -> Self {
+        self.allow_insecure_http = true;
+        self
     }
 
     fn url(&self, segments: &[&str]) -> String {
@@ -100,6 +134,17 @@ impl Config {
     }
 
     async fn run<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
+        // The API key travels as a bearer header, so plain http is loopback-only by default.
+        if !self.allow_insecure_http && is_insecure_http_url(&self.base_url) {
+            return Err(Error::Api(ApiError {
+                status_code: None,
+                name: "insecure_base_url".to_string(),
+                message: format!(
+                    "Refusing to send the API key over plain http to {}. Use https, or call MillionSend::allow_insecure_http().",
+                    self.base_url
+                ),
+            }));
+        }
         let response = req
             .bearer_auth(&self.api_key)
             .header(reqwest::header::ACCEPT, "application/json")
