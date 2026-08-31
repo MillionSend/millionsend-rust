@@ -3,7 +3,7 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
-    BatchResponse, CancelEmailResponse, CreateEmailResponse, Email, SendEmailOptions,
+    BatchResponse, CancelEmailResponse, CreateEmailResponse, Email, EmailInsights, SendEmailOptions,
 };
 
 /// Transactional email. Mirrors Resend's `emails` resource.
@@ -28,6 +28,12 @@ impl Emails {
     /// `GET /emails/:id`
     pub async fn get(&self, id: &str) -> Result<Email> {
         self.0.get(&["emails", id], &[]).await
+    }
+
+    /// `GET /emails/:id/insights` — the pre-send best-practice report. 404
+    /// (`not_found`) when the email is unknown or has no insights yet.
+    pub async fn get_insights(&self, id: &str) -> Result<EmailInsights> {
+        self.0.get(&["emails", id, "insights"], &[]).await
     }
 
     /// `POST /emails/:id/cancel` — only scheduled, unsent emails.

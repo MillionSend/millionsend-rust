@@ -131,7 +131,8 @@ async fn emails_get_and_cancel_hit_the_right_paths() {
             "object": "email", "id": "e1", "from": "a@x.dev", "to": ["b@x.dev"],
             "cc": null, "bcc": null, "reply_to": null, "subject": "s",
             "html": null, "text": "t", "created_at": "2026-01-01T00:00:00Z",
-            "scheduled_at": null, "message_id": "m1", "last_event": "delivered"
+            "scheduled_at": null, "message_id": "m1", "last_event": "delivered",
+            "score": 8.5
         })))
         .mount(&server)
         .await;
@@ -144,8 +145,161 @@ async fn emails_get_and_cancel_hit_the_right_paths() {
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let email = ms.emails.get("e1").await.unwrap();
     assert_eq!(email.message_id, "m1");
+    assert_eq!(email.score, Some(8.5));
     let cancelled = ms.emails.cancel("e1").await.unwrap();
     assert_eq!(cancelled.id, "e1");
+}
+
+#[tokio::test]
+async fn emails_get_score_null_maps_to_none() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/e2"))
+        .respond_with(ok_json(json!({
+            "object": "email", "id": "e2", "from": "a@x.dev", "to": ["b@x.dev"],
+            "cc": null, "bcc": null, "reply_to": null, "subject": "s",
+            "html": null, "text": "t", "created_at": "2026-01-01T00:00:00Z",
+            "scheduled_at": null, "message_id": "m2", "last_event": "sent",
+            "score": null
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    assert_eq!(ms.emails.get("e2").await.unwrap().score, None);
+}
+
+#[tokio::test]
+async fn emails_get_insights_maps_full_report() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/e1/insights"))
+        .respond_with(ok_json(json!({
+            "object": "email_insights",
+            "email_id": "e1",
+            "score": 8.5,
+            "score_version": 1,
+            "band": "excellent",
+            "marketing": true,
+            "html_size_bytes": 12345,
+            "computed_at": "2026-01-01T00:00:00Z",
+            "checks": [
+                { "id": "has_unsubscribe", "severity": "critical", "status": "fail",
+                  "penalty": 1.25, "detail": { "reason": "no List-Unsubscribe", "count": 2 } },
+                { "id": "plain_text_part", "severity": "minor", "status": "pass", "penalty": 0 },
+                // The check catalog and enums grow across score versions; unknown
+                // future values must deserialize, not throw.
+                { "id": "some_future_check", "severity": "cosmic", "status": "soft_fail",
+                  "penalty": 0.5 }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let insights = ms.emails.get_insights("e1").await.unwrap();
+    assert_eq!(insights.object, "email_insights");
+    assert_eq!(insights.email_id, "e1");
+    assert_eq!(insights.score, 8.5);
+    assert_eq!(insights.score_version, 1);
+    assert_eq!(insights.band, "excellent");
+    assert!(insights.marketing);
+    assert_eq!(insights.html_size_bytes, Some(12345));
+    assert_eq!(insights.computed_at, "2026-01-01T00:00:00Z");
+    assert_eq!(insights.checks.len(), 3);
+
+    let failed = &insights.checks[0];
+    assert_eq!(failed.id, "has_unsubscribe");
+    assert_eq!(failed.severity, "critical");
+    assert_eq!(failed.status, "fail");
+    assert_eq!(failed.penalty, 1.25);
+    let detail = failed.detail.as_ref().unwrap();
+    assert_eq!(detail["reason"], json!("no List-Unsubscribe"));
+    assert_eq!(detail["count"], json!(2));
+
+    assert!(insights.checks[1].detail.is_none());
+    assert_eq!(insights.checks[2].status, "soft_fail");
+}
+
+#[tokio::test]
+async fn emails_get_insights_404_surfaces_api_error() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/nope/insights"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "statusCode": 404, "name": "not_found", "message": "Email not found"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let err = ms.emails.get_insights("nope").await.unwrap_err();
+    assert_eq!(err.status_code(), Some(404));
+    assert_eq!(err.name(), Some("not_found"));
+}
+
+// ---- deliverability ------------------------------------------------------
+
+#[tokio::test]
+async fn deliverability_get_maps_full_report() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/deliverability"))
+        .respond_with(ok_json(json!({
+            "object": "deliverability",
+            "score": 8.7, "band": "good",
+            "content_score": 8.2, "outcome_score": 9.1,
+            "complaint_rate": 0.0002, "hard_bounce_rate": 0.001,
+            "emails_sent": 12345, "scored_recipients": 23456,
+            "window_days": 30, "insufficient_outcome_data": false,
+            "guardrail_status": "ok",
+            "score_version": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let report = ms.deliverability.get().await.unwrap();
+    assert_eq!(report.object, "deliverability");
+    assert_eq!(report.score, Some(8.7));
+    assert_eq!(report.band.as_deref(), Some("good"));
+    assert_eq!(report.content_score, Some(8.2));
+    assert_eq!(report.outcome_score, Some(9.1));
+    assert_eq!(report.complaint_rate, 0.0002);
+    assert_eq!(report.hard_bounce_rate, 0.001);
+    assert_eq!(report.emails_sent, 12345);
+    assert_eq!(report.scored_recipients, 23456);
+    assert_eq!(report.window_days, 30);
+    assert!(!report.insufficient_outcome_data);
+    assert_eq!(report.guardrail_status, "ok");
+    assert_eq!(report.score_version, 1);
+}
+
+#[tokio::test]
+async fn deliverability_get_maps_null_scores() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/deliverability"))
+        .respond_with(ok_json(json!({
+            "object": "deliverability",
+            "score": null, "band": null,
+            "content_score": null, "outcome_score": null,
+            "complaint_rate": 0.0, "hard_bounce_rate": 0.0,
+            "emails_sent": 0, "scored_recipients": 0,
+            "window_days": 30, "insufficient_outcome_data": true,
+            "guardrail_status": "ok",
+            "score_version": 1
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let report = ms.deliverability.get().await.unwrap();
+    assert_eq!(report.score, None);
+    assert_eq!(report.band, None);
+    assert_eq!(report.content_score, None);
+    assert_eq!(report.outcome_score, None);
+    assert!(report.insufficient_outcome_data);
 }
 
 #[tokio::test]

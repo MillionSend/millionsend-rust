@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.2"
+millionsend = "0.3"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -105,12 +105,16 @@ use millionsend::SendEmailOptions;
 ms.emails.send(&email).await?;                                    // POST /emails
 ms.emails.send_with_idempotency_key(&email, "key-123").await?;   // + Idempotency-Key
 ms.emails.get(&id).await?;                                        // GET /emails/:id
+ms.emails.get_insights(&id).await?;                               // GET /emails/:id/insights
 ms.emails.cancel(&id).await?;                                     // POST /emails/:id/cancel
 
 // Batch: 1–100 in one call.
 ms.batch.send(&[email_a, email_b]).await?;                        // POST /emails/batch
 ms.batch.send_with_idempotency_key(&emails, "batch-1").await?;
 ```
+
+`get` includes a nullable best-practice `score` (0–10); `get_insights` returns
+the full per-check report behind it (404 `not_found` until insights exist).
 
 ### Contacts
 
@@ -214,6 +218,18 @@ ms.segments.get(&id).await?;   // includes a live contact_count
 ms.segments.list(None).await?;
 ms.segments.update(&id, &Default::default()).await?;
 ms.segments.delete(&id).await?;
+```
+
+### Deliverability
+
+Account-level score over the trailing 30 days; scores are `None` until there is
+enough data.
+
+```rust
+let report = ms.deliverability.get().await?;   // GET /deliverability
+if let Some(score) = report.score {
+    println!("{score} ({})", report.band.as_deref().unwrap_or("-"));
+}
 ```
 
 ## Migrating from Resend

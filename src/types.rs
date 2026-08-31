@@ -158,6 +158,44 @@ pub struct Email {
     pub scheduled_at: Option<String>,
     pub message_id: String,
     pub last_event: String,
+    /// Best-practice score (0–10, one decimal); `None` when the email has no
+    /// insights (sent before the feature landed, or never sent).
+    pub score: Option<f64>,
+}
+
+/// `GET /emails/:id/insights` — the pre-send best-practice report computed when
+/// the email was sent.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmailInsights {
+    pub object: String,
+    pub email_id: String,
+    /// Best-practice score, 0–10, one decimal.
+    pub score: f64,
+    pub score_version: u32,
+    /// `excellent` | `good` | `needs_attention` | `at_risk` — kept a plain
+    /// string so future bands never break deserialization.
+    pub band: String,
+    pub marketing: bool,
+    pub html_size_bytes: Option<u64>,
+    pub computed_at: String,
+    pub checks: Vec<InsightCheck>,
+}
+
+/// One check from the insights report. `id` is an open catalog that grows
+/// across score versions; `severity`/`status` stay plain strings for the same
+/// reason `band` does.
+#[derive(Debug, Clone, Deserialize)]
+pub struct InsightCheck {
+    pub id: String,
+    /// `critical` | `major` | `minor` | `info`.
+    pub severity: String,
+    /// `pass` | `fail` | `passed_by_design` | `not_applicable` | `unknown`.
+    pub status: String,
+    /// Points deducted from the score; 0 unless `status` is `fail`.
+    pub penalty: f64,
+    /// Free-form per-check evidence; absent on most checks.
+    #[serde(default)]
+    pub detail: Option<HashMap<String, serde_json::Value>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -169,6 +207,30 @@ pub struct CancelEmailResponse {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchResponse {
     pub data: Vec<CreateEmailResponse>,
+}
+
+// ---- deliverability ------------------------------------------------------
+
+/// `GET /deliverability` — the account score over the trailing window. Scores
+/// are 0–10 with one decimal; `None` means not enough data to compute.
+#[derive(Debug, Clone, Deserialize)]
+pub struct DeliverabilityReport {
+    pub object: String,
+    pub score: Option<f64>,
+    /// `excellent` | `good` | `needs_attention` | `at_risk` — a plain string so
+    /// future bands never break deserialization.
+    pub band: Option<String>,
+    pub content_score: Option<f64>,
+    pub outcome_score: Option<f64>,
+    pub complaint_rate: f64,
+    pub hard_bounce_rate: f64,
+    pub emails_sent: u64,
+    pub scored_recipients: u64,
+    pub window_days: u32,
+    pub insufficient_outcome_data: bool,
+    /// `ok` | `warning` | `paused` — plain string, same leniency rule.
+    pub guardrail_status: String,
+    pub score_version: u32,
 }
 
 // ---- contacts ------------------------------------------------------------

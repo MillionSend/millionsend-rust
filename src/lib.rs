@@ -3,7 +3,7 @@
 //!
 //! Construct a [`MillionSend`] once and reuse it (it is cheap to [`Clone`]). Each
 //! resource hangs off a public field: `emails`, `batch`, `contacts`, `topics`,
-//! `broadcasts`, `segments`.
+//! `broadcasts`, `segments`, `deliverability`.
 //!
 //! ```no_run
 //! use millionsend::{MillionSend, SendEmailOptions};
@@ -31,6 +31,7 @@
 
 mod broadcasts;
 mod contacts;
+mod deliverability;
 mod emails;
 mod error;
 mod http;
@@ -44,6 +45,7 @@ use http::Config;
 
 pub use broadcasts::Broadcasts;
 pub use contacts::{ContactTopics, Contacts};
+pub use deliverability::Deliverability;
 pub use emails::{Batch, Emails};
 pub use error::{ApiError, Error, Result};
 pub use segments::Segments;
@@ -61,6 +63,7 @@ pub struct MillionSend {
     pub topics: Topics,
     pub broadcasts: Broadcasts,
     pub segments: Segments,
+    pub deliverability: Deliverability,
 }
 
 impl MillionSend {
@@ -118,7 +121,8 @@ impl MillionSend {
             contacts: Contacts::new(config.clone()),
             topics: Topics(config.clone()),
             broadcasts: Broadcasts(config.clone()),
-            segments: Segments(config),
+            segments: Segments(config.clone()),
+            deliverability: Deliverability(config),
         }
     }
 }
