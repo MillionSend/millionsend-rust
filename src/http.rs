@@ -75,6 +75,10 @@ impl Config {
         self
     }
 
+    pub(crate) fn base_url(&self) -> &str {
+        &self.base_url
+    }
+
     fn url(&self, segments: &[&str]) -> String {
         let mut url = self.base_url.clone();
         for &segment in segments {

@@ -1813,3 +1813,92 @@ async fn usage_get_maps_report() {
     assert_eq!(usage.team.name, "Acme");
     assert_eq!(usage.app_url.as_deref(), Some("https://app.x.dev"));
 }
+
+// ---- 0.5: cloud default, contact topics list, suppressed recipients --------
+
+/// One test, sequential: `MILLIONSEND_BASE_URL` is process-global and this is
+/// the only test that reads or writes it.
+#[tokio::test]
+async fn base_url_defaults_to_cloud_env_and_explicit_win() {
+    std::env::remove_var("MILLIONSEND_BASE_URL");
+    assert_eq!(
+        MillionSend::new("ms_test").base_url(),
+        "https://api.millionsend.com"
+    );
+
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/topics"))
+        .respond_with(ok_json(json!({ "data": [] })))
+        .mount(&server)
+        .await;
+    std::env::set_var("MILLIONSEND_BASE_URL", server.uri());
+    let ms = MillionSend::new("ms_test");
+    assert_eq!(ms.base_url(), server.uri());
+    assert!(ms.topics.list().await.unwrap().data.is_empty());
+
+    assert_eq!(
+        MillionSend::with_base_url("ms_test", "https://mail.acme.dev/").base_url(),
+        "https://mail.acme.dev"
+    );
+    std::env::remove_var("MILLIONSEND_BASE_URL");
+}
+
+#[tokio::test]
+async fn contact_topics_list_gets_encoded_email_and_decodes_shape() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/contacts/ada%40acme.dev/topics"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [
+                { "id": "t1", "name": "Insights", "description": "Weekly",
+                  "subscription": "opt_out", "explicit": true },
+                { "id": "t2", "name": "Product", "description": null,
+                  "subscription": "opt_in", "explicit": false }
+            ]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let topics = ms
+        .contacts
+        .topics
+        .list(ContactAddress::email("ada@acme.dev"))
+        .await
+        .unwrap();
+    assert_eq!(topics.object, "list");
+    assert!(!topics.has_more);
+    assert_eq!(topics.data.len(), 2);
+    assert_eq!(topics.data[0].id, "t1");
+    assert_eq!(topics.data[0].name, "Insights");
+    assert_eq!(topics.data[0].description.as_deref(), Some("Weekly"));
+    assert_eq!(topics.data[0].subscription, TopicSubscription::OptOut);
+    assert!(topics.data[0].explicit);
+    assert_eq!(topics.data[1].description, None);
+    assert_eq!(topics.data[1].subscription, TopicSubscription::OptIn);
+    assert!(!topics.data[1].explicit);
+}
+
+#[tokio::test]
+async fn emails_send_surfaces_all_recipients_suppressed() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .respond_with(ResponseTemplate::new(422).set_body_json(json!({
+            "statusCode": 422, "name": "all_recipients_suppressed",
+            "message": "All recipients are suppressed"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let err = ms
+        .emails
+        .send(&SendEmailOptions::new("a@x.dev", "b@x.dev", "s"))
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), Some(422));
+    assert_eq!(err.name(), Some("all_recipients_suppressed"));
+}

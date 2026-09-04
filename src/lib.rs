@@ -10,7 +10,7 @@
 //! use millionsend::{MillionSend, SendEmailOptions};
 //!
 //! # async fn run() -> millionsend::Result<()> {
-//! let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
+//! let ms = MillionSend::new("ms_123");
 //! let sent = ms
 //!     .emails
 //!     .send(&SendEmailOptions {
@@ -65,7 +65,7 @@ pub use types::*;
 pub use usage::Usage;
 pub use webhooks::Webhooks;
 
-const DEFAULT_BASE_URL: &str = "http://localhost:3001";
+const DEFAULT_BASE_URL: &str = "https://api.millionsend.com";
 
 /// The MillionSend client. Construct once and reuse.
 #[derive(Clone)]
@@ -87,14 +87,16 @@ pub struct MillionSend {
 
 impl MillionSend {
     /// Client for the given API key. The base URL falls back to
-    /// `MILLIONSEND_BASE_URL`, then `http://localhost:3001`.
+    /// `MILLIONSEND_BASE_URL`, then MillionSend Cloud (`https://api.millionsend.com`).
+    /// Self-hosted instances set their origin with [`MillionSend::with_base_url`].
     pub fn new(api_key: impl Into<String>) -> Self {
         let base_url =
             std::env::var("MILLIONSEND_BASE_URL").unwrap_or_else(|_| DEFAULT_BASE_URL.to_string());
         Self::build(api_key.into(), base_url)
     }
 
-    /// Client for the given API key pointed at an explicit base URL.
+    /// Client for the given API key pointed at an explicit base URL (a
+    /// self-hosted instance).
     pub fn with_base_url(api_key: impl Into<String>, base_url: impl Into<String>) -> Self {
         Self::build(api_key.into(), base_url.into())
     }
@@ -122,6 +124,11 @@ impl MillionSend {
     /// because the API key travels as a bearer header.
     pub fn allow_insecure_http(self) -> Self {
         Self::from_config(self.config().allow_insecure_http())
+    }
+
+    /// The base URL every request is sent to (no trailing slash).
+    pub fn base_url(&self) -> &str {
+        self.emails.0.base_url()
     }
 
     fn config(&self) -> Config {

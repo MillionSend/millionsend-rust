@@ -651,6 +651,19 @@ pub struct UpdateContactTopicsResponse {
     pub id: String,
 }
 
+/// One row of `GET /contacts/:idOrEmail/topics`: `subscription` is the
+/// contact's effective choice (the explicit one, else the topic default) and
+/// `explicit` is false when it is the default.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContactTopic {
+    pub id: String,
+    pub name: String,
+    #[serde(default)]
+    pub description: Option<String>,
+    pub subscription: TopicSubscription,
+    pub explicit: bool,
+}
+
 // ---- topics --------------------------------------------------------------
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]

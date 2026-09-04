@@ -5,9 +5,9 @@ use crate::http::Config;
 use crate::types::{
     list_query, AddContactSegmentResponse, BatchContactsOptions, BatchContactsResponse,
     BatchValidation, Contact, ContactAddress, ContactId, ContactListItem, ContactProperty,
-    ContactPropertyId, ContactTopicUpdate, CreateContactOptions, CreateContactPropertyOptions,
-    DeleteContactPropertyResponse, DeleteContactResponse, List, ListOptions,
-    RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
+    ContactPropertyId, ContactTopic, ContactTopicUpdate, CreateContactOptions,
+    CreateContactPropertyOptions, DeleteContactPropertyResponse, DeleteContactResponse, List,
+    ListOptions, RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
     UpdateContactTopicsResponse,
 };
 
@@ -98,11 +98,21 @@ impl Contacts {
     }
 }
 
-/// Per-contact topic subscriptions (opt a contact in/out of a topic).
+/// Per-contact topic subscriptions: list a contact's effective choices, opt
+/// a contact in/out of a topic.
 #[derive(Clone)]
 pub struct ContactTopics(pub(crate) Arc<Config>);
 
 impl ContactTopics {
+    /// `GET /contacts/:idOrEmail/topics` — every topic of the team with the
+    /// contact's effective subscription, in one page.
+    pub async fn list(&self, address: impl Into<ContactAddress>) -> Result<List<ContactTopic>> {
+        let address = address.into();
+        self.0
+            .get(&["contacts", address.key(), "topics"], &[])
+            .await
+    }
+
     /// `PATCH /contacts/:idOrEmail/topics` with a bare array of updates.
     pub async fn update(
         &self,

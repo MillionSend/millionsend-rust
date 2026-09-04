@@ -5,8 +5,8 @@ self-hostable, Resend-compatible email API on AWS SES.
 
 The HTTP API is wire-compatible with Resend, and this crate mirrors the shape of
 [`resend-rs`](https://crates.io/crates/resend-rs), so migrating is mostly a
-find-and-replace: swap the crate, the client type, and point the base URL at
-your instance.
+find-and-replace: swap the crate and the client type (and, if you self-host,
+point the base URL at your instance).
 
 Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.4"
+millionsend = "0.5"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -25,7 +25,7 @@ use millionsend::{MillionSend, SendEmailOptions};
 
 #[tokio::main]
 async fn main() -> Result<(), Box<dyn std::error::Error>> {
-    let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
+    let ms = MillionSend::new("ms_123"); // Cloud; self-hosted: with_base_url(key, origin)
 
     let sent = ms
         .emails
@@ -51,11 +51,13 @@ many (`vec!["a@b.dev", "c@d.dev"].into()`).
 ```rust
 use millionsend::MillionSend;
 
-// Explicit base URL.
-let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
-
-// Key only; base URL falls back to MILLIONSEND_BASE_URL, then http://localhost:3001.
+// Key only: MillionSend Cloud (https://api.millionsend.com), unless
+// MILLIONSEND_BASE_URL is set.
 let ms = MillionSend::new("ms_123");
+
+// Self-hosted: explicit base URL (wins over the environment).
+let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
+assert_eq!(ms.base_url(), "https://mail.acme.dev");
 
 // Both from the environment (MILLIONSEND_API_KEY + optional MILLIONSEND_BASE_URL).
 let ms = MillionSend::from_env()?;
@@ -68,8 +70,9 @@ let ms = MillionSend::new("ms_123").with_client(reqwest::Client::new());
 let ms = MillionSend::with_base_url("ms_123", "http://10.0.0.5:3001").allow_insecure_http();
 ```
 
-MillionSend is self-hosted, so there is no cloud default — **set the base URL to
-your deployment in production.** Every request carries
+With no base URL the client talks to MillionSend Cloud, so the key alone is
+enough; a self-hosted instance sets its origin with `with_base_url` or
+`MILLIONSEND_BASE_URL`. Every request carries
 `Authorization: Bearer <api_key>` and a `millionsend-rust/<version>` User-Agent.
 Plain `http://` is only accepted for loopback hosts (`localhost`, `127.0.0.1`, `::1`);
 any other `http://` URL makes every call return `Error::Api` named `insecure_base_url`,
@@ -82,7 +85,8 @@ Fallible calls return `Result<T, millionsend::Error>`:
 
 - `Error::Api(ApiError { status_code, name, message })` — a non-2xx response.
   `name` is a stable snake_case code you can match on (`validation_error`,
-  `not_found`, `restricted_api_key`, `sending_paused`, …).
+  `not_found`, `restricted_api_key`, `sending_paused`,
+  `all_recipients_suppressed`, …).
 - `Error::Http(_)` — a transport failure that never reached the API;
   `err.status_code()` is `None`.
 - `Error::Parse(_)` — a 2xx body that failed to deserialize.
@@ -134,7 +138,9 @@ ms.emails.delete(&id).await?;                                     // DELETE /ema
 ```
 
 Every field is put on the wire, including `template`, which the API currently
-rejects with a 422 (send `html`/`text` instead). `get` includes a nullable
+rejects with a 422 (send `html`/`text` instead). `send` and `batch.send` answer
+422 `all_recipients_suppressed` when every `to` recipient is on the suppression
+list or opted out of the send's `topic_id`. `get` includes a nullable
 best-practice `score` (0–10); `get_insights` returns the full per-check report
 behind it (404 `not_found` until insights exist).
 
@@ -218,14 +224,19 @@ the contact `id` and a `status` (`created` | `updated` | `skipped`).
 ```rust
 use millionsend::{ContactTopicUpdate, TopicSubscription};
 
+ms.contacts.topics.list("contact-id").await?;                   // GET   /contacts/:id/topics
 ms.contacts.topics.update("contact-id", &[ContactTopicUpdate {
     id: "topic-id".into(),
     subscription: TopicSubscription::OptOut,
-}]).await?;                                                // PATCH /contacts/:id/topics
+}]).await?;                                                     // PATCH /contacts/:id/topics
 
 ms.contacts.segments.add("contact-id", &segment.id).await?;     // POST   /contacts/:id/segments/:segmentId
 ms.contacts.segments.remove("contact-id", &segment.id).await?;  // DELETE /contacts/:id/segments/:segmentId
 ```
+
+`topics.list` returns every topic of the team (one page) with the contact's
+effective `subscription` — the explicit choice, else the topic default — and
+`explicit: false` when it is the default.
 
 #### Contact properties
 
@@ -476,17 +487,17 @@ if let Some(cap) = usage.limits.emails_per_day {
 - use resend_rs::{Resend, types::CreateEmailBaseOptions};
 - let resend = Resend::new("re_123");
 + use millionsend::{MillionSend, SendEmailOptions};
-+ let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
++ let ms = MillionSend::new("ms_123"); // self-hosted: with_base_url("ms_123", "https://mail.acme.dev")
 ```
 
 Resource and method names match: `emails`, `batch`, `contacts`, `topics`,
 `broadcasts`, `segments`, `suppressions`, `domains`, `webhooks`, `api_keys`,
 `templates`. Notes:
 
-- **Contacts nest** their sub-resources — `contacts.topics.update`,
+- **Contacts nest** their sub-resources — `contacts.topics.list`/`update`,
   `contacts.segments.add`/`remove`, `contacts.properties.*` — where `resend-rs`
-  keeps them flat (`update_contact_topics`, `add_contact_segment`,
-  `create_property`, …).
+  keeps them flat (`get_contact_topics`, `update_contact_topics`,
+  `add_contact_segment`, `create_property`, …).
 
 - **No audiences.** Contacts are team-global; the API's `/audiences/*` routes
   are a compatibility shim and are not part of this SDK. Use `segments` (saved
