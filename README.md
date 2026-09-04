@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.3"
+millionsend = "0.4"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -44,7 +44,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
 ```
 
 `to`, `cc`, `bcc`, and `reply_to` accept a single address (`"a@b.dev".into()`) or
-many (`vec!["a@b.dev".to_string(), "c@d.dev".to_string()].into()`).
+many (`vec!["a@b.dev", "c@d.dev"].into()`).
 
 ## Configuration
 
@@ -100,21 +100,61 @@ match ms.emails.get(&id).await {
 ### Emails
 
 ```rust
-use millionsend::SendEmailOptions;
+use millionsend::{Attachment, IdempotentTrait, SendEmailOptions, Tag, UpdateEmailOptions};
+
+let email = SendEmailOptions {
+    from: "Acme <onboarding@acme.dev>".into(),
+    to: vec!["ada@acme.dev", "bob@acme.dev"].into(),
+    subject: "Invoice".into(),
+    html: Some("<p>Attached.</p>".into()),
+    reply_to: Some("billing@acme.dev".into()),
+    tags: Some(vec![Tag { name: "kind".into(), value: "invoice".into() }]),
+    topic_id: Some(topic.id.clone()),                      // skips opted-out recipients
+    attachments: Some(vec![Attachment {
+        filename: "invoice.pdf".into(),
+        content: Some(base64_pdf),                          // base64
+        content_type: Some("application/pdf".into()),
+        ..Default::default()
+    }]),
+    headers: Some([("X-Entity-Ref-ID".to_string(), "42".to_string())].into()),
+    ..Default::default()
+};
 
 ms.emails.send(&email).await?;                                    // POST /emails
-ms.emails.send_with_idempotency_key(&email, "key-123").await?;   // + Idempotency-Key
+ms.emails.send(email.with_idempotency_key("inv-42")).await?;      // + Idempotency-Key (Resend shape)
+ms.emails.send_with_idempotency_key(&email, "inv-42").await?;     // same, explicit
 ms.emails.get(&id).await?;                                        // GET /emails/:id
+ms.emails.list(None).await?;                                      // GET /emails
+ms.emails.update(&id, &UpdateEmailOptions {                       // PATCH /emails/:id
+    scheduled_at: "2026-09-01T09:00:00Z".into(),
+}).await?;
 ms.emails.get_insights(&id).await?;                               // GET /emails/:id/insights
 ms.emails.cancel(&id).await?;                                     // POST /emails/:id/cancel
-
-// Batch: 1–100 in one call.
-ms.batch.send(&[email_a, email_b]).await?;                        // POST /emails/batch
-ms.batch.send_with_idempotency_key(&emails, "batch-1").await?;
+ms.emails.delete(&id).await?;                                     // DELETE /emails/:id
 ```
 
-`get` includes a nullable best-practice `score` (0–10); `get_insights` returns
-the full per-check report behind it (404 `not_found` until insights exist).
+Every field is put on the wire, including `template`, which the API currently
+rejects with a 422 (send `html`/`text` instead). `get` includes a nullable
+best-practice `score` (0–10); `get_insights` returns the full per-check report
+behind it (404 `not_found` until insights exist).
+
+#### Batch
+
+```rust
+use millionsend::{BatchValidation, IdempotentTrait};
+
+let emails = vec![email_a, email_b];                       // 1–100
+ms.batch.send(&emails).await?;                             // POST /emails/batch
+ms.batch.send(emails.with_idempotency_key("batch-1")).await?;
+ms.batch.send_with_idempotency_key(&emails, "batch-1").await?;
+
+// x-batch-validation: permissive — invalid items land in `errors` instead of
+// failing the whole call (strict is the server default).
+let res = ms.batch.send_with_batch_validation(&emails, BatchValidation::Permissive).await?;
+for err in &res.errors {
+    eprintln!("email #{} rejected: {}", err.index, err.message);
+}
+```
 
 ### Contacts
 
@@ -122,11 +162,20 @@ Contacts are team-global — one record per email address (case-insensitive);
 creating a duplicate is a 409 `validation_error`.
 
 ```rust
-use millionsend::{ContactAddress, CreateContactOptions, ListOptions, UpdateContactOptions};
+use millionsend::{
+    ContactAddress, ContactTopicUpdate, CreateContactOptions, ListOptions, SegmentRef,
+    TopicSubscription, UpdateContactOptions,
+};
 
 ms.contacts.create(&CreateContactOptions {
     email: "ada@acme.dev".into(),
     first_name: Some("Ada".into()),
+    properties: Some([("plan".to_string(), "pro".into())].into()),
+    segments: Some(vec![SegmentRef { id: segment.id.clone() }]),
+    topics: Some(vec![ContactTopicUpdate {
+        id: topic.id.clone(),
+        subscription: TopicSubscription::OptIn,
+    }]),
     ..Default::default()
 }).await?;
 
@@ -145,7 +194,26 @@ ms.contacts.delete(ContactAddress::email("ada@acme.dev")).await?;
 ms.contacts.list(Some(&ListOptions { limit: Some(20), ..Default::default() })).await?;
 ```
 
-Topic subscriptions (granular unsubscribe):
+`Contact.properties` values arrive as typed wrappers on the wire
+(`{ "type": "string", "value": "pro" }` / `{ "type": "number", "value": 3 }`).
+
+#### Batch create (MillionSend extension)
+
+```rust
+use millionsend::{BatchContactsOptions, BatchValidation, OnConflict};
+
+let res = ms.contacts.create_batch(&contacts, Some(&BatchContactsOptions {
+    on_conflict: Some(OnConflict::Upsert),                 // error (default) | skip | upsert
+    batch_validation: Some(BatchValidation::Permissive),
+})).await?;                                                // POST /contacts/batch?on_conflict=upsert
+println!("{} created, {} failed", res.counts.created, res.counts.failed);
+for err in &res.errors { eprintln!("contacts.{}: {}", err.index, err.message); }
+```
+
+Up to 1000 contacts per call; each `data` entry carries the request `index`,
+the contact `id` and a `status` (`created` | `updated` | `skipped`).
+
+#### Topic subscriptions and segment membership
 
 ```rust
 use millionsend::{ContactTopicUpdate, TopicSubscription};
@@ -153,17 +221,44 @@ use millionsend::{ContactTopicUpdate, TopicSubscription};
 ms.contacts.topics.update("contact-id", &[ContactTopicUpdate {
     id: "topic-id".into(),
     subscription: TopicSubscription::OptOut,
-}]).await?;
+}]).await?;                                                // PATCH /contacts/:id/topics
+
+ms.contacts.segments.add("contact-id", &segment.id).await?;     // POST   /contacts/:id/segments/:segmentId
+ms.contacts.segments.remove("contact-id", &segment.id).await?;  // DELETE /contacts/:id/segments/:segmentId
+```
+
+#### Contact properties
+
+Typed definitions for the keys of `contact.properties`.
+
+```rust
+use millionsend::{ContactPropertyType, CreateContactPropertyOptions, UpdateContactPropertyOptions};
+use serde_json::{json, Value};
+
+let plan = ms.contacts.properties.create(&CreateContactPropertyOptions {
+    key: "plan".into(),
+    r#type: ContactPropertyType::String,
+    fallback_value: Some(json!("free")),
+}).await?;                                                 // POST /contact-properties
+ms.contacts.properties.get(&plan.id).await?;
+ms.contacts.properties.list(None).await?;
+ms.contacts.properties.update(&plan.id, &UpdateContactPropertyOptions {
+    fallback_value: Some(Value::Null),                     // null clears the fallback
+}).await?;
+ms.contacts.properties.delete(&plan.id).await?;
 ```
 
 ### Topics
 
 ```rust
-use millionsend::{CreateTopicOptions, TopicSubscription};
+use millionsend::{CreateTopicOptions, TopicSubscription, TopicVisibility, UpdateTopicOptions};
 
-ms.topics.create(&CreateTopicOptions::new("Product updates", TopicSubscription::OptIn)).await?;
+let mut topic = CreateTopicOptions::new("Product updates", TopicSubscription::OptIn);
+topic.visibility = Some(TopicVisibility::Public);
+ms.topics.create(&topic).await?;
 ms.topics.get(&id).await?;
-ms.topics.list().await?;    // bare { data } — topics are unpaginated
+ms.topics.list().await?;
+ms.topics.update(&id, &UpdateTopicOptions { name: Some("News".into()), ..Default::default() }).await?;
 ms.topics.delete(&id).await?;
 ```
 
@@ -176,10 +271,15 @@ with neither set, the broadcast goes to every contact.
 use millionsend::{CreateBroadcastOptions, UpdateBroadcastOptions};
 
 let broadcast = ms.broadcasts.create(&CreateBroadcastOptions {
+    name: Some("Launch".into()),
     segment_id: Some(segment.id.clone()),
     from: "Acme <news@acme.dev>".into(),
     subject: "Launch".into(),
     html: Some("<p>Hi {{{FIRST_NAME|there}}}</p>".into()),
+    preview_text: Some("It's here".into()),
+    topic_id: Some(topic.id.clone()),
+    send: Some(true),                                      // send now instead of saving a draft
+    scheduled_at: Some("in 1 hour".into()),                // with send: true — schedule instead
     ..Default::default()
 }).await?;
 
@@ -187,6 +287,7 @@ ms.broadcasts.list(None).await?;
 ms.broadcasts.get(&broadcast.id).await?;
 ms.broadcasts.update(&broadcast.id, &UpdateBroadcastOptions {
     subject: Some("Launch 🚀".into()),
+    clear_topic_id: true,                                  // sends "topic_id": null (detach)
     ..Default::default()
 }).await?;                                                 // draft only
 ms.broadcasts.send(&broadcast.id, Some("2026-09-01T09:00:00Z")).await?;  // None = send now
@@ -196,8 +297,9 @@ ms.broadcasts.delete(&broadcast.id).await?;                // draft only
 
 ### Segments (MillionSend extension)
 
-Dynamic segments are a saved filter over the team's contacts — a MillionSend
-superset with no Resend equivalent.
+A segment is either a saved filter over the team's contacts or, with no
+filter, a manual list fed by `contacts.segments.add`. `Segment.filter` is
+`None` for manual segments.
 
 ```rust
 use millionsend::{CreateSegmentOptions, SegmentCondition, SegmentFilter, SegmentMatch};
@@ -214,13 +316,130 @@ let segment = ms.segments.create(&CreateSegmentOptions {
     },
 }).await?;
 
-ms.segments.get(&id).await?;   // includes a live contact_count
+ms.segments.get(&id).await?;                 // includes a live contact_count
 ms.segments.list(None).await?;
+ms.segments.list_contacts(&id, None).await?; // GET /segments/:id/contacts
 ms.segments.update(&id, &Default::default()).await?;
 ms.segments.delete(&id).await?;
 ```
 
-### Deliverability
+### Suppressions
+
+Addresses the team never sends to. Entries are addressable by id or email.
+
+```rust
+use millionsend::{
+    AddSuppressionOptions, BatchAddSuppressionsOptions, BatchRemoveSuppressionsOptions,
+    ListSuppressionsOptions, SuppressionOrigin,
+};
+
+ms.suppressions.add(&AddSuppressionOptions::new("bounced@example.com")).await?;   // POST /suppressions
+ms.suppressions.get("bounced@example.com").await?;                                // GET /suppressions/:idOrEmail
+ms.suppressions.list(Some(&ListSuppressionsOptions {
+    origin: Some(SuppressionOrigin::Complaint),                                    // bounce | complaint | manual | unsubscribe
+    ..Default::default()
+})).await?;
+ms.suppressions.remove("bounced@example.com").await?;                             // DELETE /suppressions/:idOrEmail
+
+ms.suppressions.batch_add(&BatchAddSuppressionsOptions {
+    emails: vec!["a@example.com".into(), "b@example.com".into()],                 // up to 1000
+    origin: Some(SuppressionOrigin::Manual),
+}).await?;
+ms.suppressions.batch_remove(&BatchRemoveSuppressionsOptions::Emails(vec!["a@example.com".into()])).await?;
+ms.suppressions.batch_remove(&BatchRemoveSuppressionsOptions::Ids(vec![id])).await?;
+```
+
+### Domains
+
+```rust
+use millionsend::{CreateDomainOptions, UpdateDomainOptions};
+
+let domain = ms.domains.create(&CreateDomainOptions {
+    name: "acme.dev".into(),
+    open_tracking: Some(true),
+    click_tracking: Some(true),
+    tracking_subdomain: Some("links".into()),              // links.acme.dev
+    ..Default::default()                                   // region/custom_return_path: deployment defaults
+}).await?;
+for record in &domain.records {
+    println!("{} {} {}", record.r#type, record.name, record.value);
+}
+
+ms.domains.list(None).await?;                              // items carry no records
+ms.domains.get(&domain.id).await?;
+ms.domains.verify(&domain.id).await?;                      // POST /domains/:id/verify
+ms.domains.update(&domain.id, &UpdateDomainOptions {
+    click_tracking: Some(false),
+    tracking_subdomain: Some(None),                        // null clears the branded host
+    ..Default::default()
+}).await?;
+ms.domains.delete(&domain.id).await?;
+```
+
+### Webhooks
+
+```rust
+use millionsend::{CreateWebhookOptions, UpdateWebhookOptions, WebhookStatus};
+
+let hook = ms.webhooks.create(&CreateWebhookOptions {
+    endpoint: "https://acme.dev/hooks/millionsend".into(),
+    events: vec!["email.delivered".into(), "email.bounced".into(), "deliverability.paused".into()],
+    signing_secret: None,                                  // minted; or pass your own whsec_…
+}).await?;
+println!("verify payloads with {}", hook.signing_secret);
+
+ms.webhooks.list(None).await?;
+ms.webhooks.get(&hook.id).await?;                          // includes signing_secret
+ms.webhooks.update(&hook.id, &UpdateWebhookOptions {
+    status: Some(WebhookStatus::Disabled),
+    ..Default::default()
+}).await?;
+ms.webhooks.delete(&hook.id).await?;
+```
+
+### API keys
+
+```rust
+use millionsend::{ApiKeyPermission, CreateApiKeyOptions};
+
+let key = ms.api_keys.create(&CreateApiKeyOptions {
+    name: "ci".into(),
+    permission: Some(ApiKeyPermission::SendingAccess),     // default full_access
+    domain_id: Some(domain.id.clone()),                    // restrict sending to one domain
+}).await?;
+println!("{}", key.token);                                 // shown once
+ms.api_keys.list(None).await?;
+ms.api_keys.delete(&key.id).await?;
+```
+
+### Templates
+
+Addressable by id or alias.
+
+```rust
+use millionsend::{CreateTemplateOptions, UpdateTemplateOptions};
+
+let mut welcome = CreateTemplateOptions::new("Welcome", "<p>Hi {{{FIRST_NAME|there}}}</p>");
+welcome.subject = Some("Welcome!".into());
+welcome.alias = Some("welcome".into());
+let created = ms.templates.create(&welcome).await?;
+
+ms.templates.get("welcome").await?;
+ms.templates.list(None).await?;
+ms.templates.update("welcome", &UpdateTemplateOptions {
+    subject: Some(Some("Hello".into())),                   // set
+    alias: Some(None),                                     // null clears
+    ..Default::default()
+}).await?;
+ms.templates.publish(&created.id).await?;                  // no-op kept for Resend compatibility
+ms.templates.duplicate(&created.id).await?;
+ms.templates.delete(&created.id).await?;
+```
+
+`from`, `reply_to` and `variables` are passed through; the API currently
+answers 422 when they are set.
+
+### Deliverability (MillionSend extension)
 
 Account-level score over the trailing 30 days; scores are `None` until there is
 enough data.
@@ -229,6 +448,16 @@ enough data.
 let report = ms.deliverability.get().await?;   // GET /deliverability
 if let Some(score) = report.score {
     println!("{score} ({})", report.band.as_deref().unwrap_or("-"));
+}
+```
+
+### Usage (MillionSend extension)
+
+```rust
+let usage = ms.usage.get().await?;             // GET /usage
+println!("{} sent today, resets {}", usage.today.emails_sent, usage.today.resets_at);
+if let Some(cap) = usage.limits.emails_per_day {
+    println!("plan {:?} caps at {cap}/day", usage.plan);
 }
 ```
 
@@ -241,13 +470,21 @@ if let Some(score) = report.score {
 + let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
 ```
 
-Method names and nesting match. Notes:
+Method names and nesting match: `emails`, `batch`, `contacts` (with `topics`,
+`segments`, `properties`), `topics`, `broadcasts`, `segments`, `suppressions`,
+`domains`, `webhooks`, `api_keys`, `templates`. Notes:
 
-- **Domains and API keys** are managed in the MillionSend dashboard, not via the
-  API — there are no `domains`/`api_keys` resources here.
-- **No audiences.** Contacts are team-global; use `segments` (saved filters) to
-  target a subset, or a broadcast with no `segment_id`/`topic_id` to reach
-  everyone.
+- **No audiences.** Contacts are team-global; the API's `/audiences/*` routes
+  are a compatibility shim and are not part of this SDK. Use `segments` (saved
+  filters or manual lists) to target a subset, or a broadcast with no
+  `segment_id`/`topic_id` to reach everyone.
+- **MillionSend extensions** with no Resend counterpart: `segments`,
+  `contacts.create_batch`, `deliverability`, `usage`, `emails.get_insights`.
+- **Templates** are always published; `publish` is a no-op kept for
+  compatibility, and `from`/`reply_to`/`variables` are rejected with 422.
+- **Nullable clears**: `Option<Option<T>>` fields (`Some(None)`) send JSON
+  `null`; `UpdateBroadcastOptions::clear_topic_id` does the same for
+  `topic_id`.
 
 ## License
 

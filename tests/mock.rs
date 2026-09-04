@@ -744,3 +744,1033 @@ async fn transport_failure_surfaces_as_http_with_null_status() {
     assert!(matches!(err, Error::Http(_)), "got {err:?}");
     assert_eq!(err.status_code(), None);
 }
+
+// ---- body completeness ---------------------------------------------------
+
+#[tokio::test]
+async fn emails_send_puts_every_field_on_the_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .and(body_json(json!({
+            "from": "Acme <a@x.dev>",
+            "to": ["b@x.dev", "c@x.dev"],
+            "subject": "s",
+            "html": "<p>h</p>",
+            "text": "t",
+            "cc": "cc@x.dev",
+            "bcc": ["bcc@x.dev"],
+            "reply_to": "r@x.dev",
+            "scheduled_at": "2999-01-01T00:00:00Z",
+            "tags": [{ "name": "k", "value": "v" }],
+            "topic_id": "t1",
+            "attachments": [{
+                "filename": "a.txt", "content": "aGk=", "content_type": "text/plain",
+                "content_id": "cid"
+            }, {
+                "filename": "b.pdf", "path": "https://x.dev/b.pdf"
+            }],
+            "headers": { "X-Entity-Ref-ID": "123" },
+            "template": { "id": "tpl_1", "variables": { "name": "Ada" } }
+        })))
+        .respond_with(ok_json(json!({ "id": "abc" })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let email = SendEmailOptions {
+        from: "Acme <a@x.dev>".into(),
+        to: vec!["b@x.dev", "c@x.dev"].into(),
+        subject: "s".into(),
+        html: Some("<p>h</p>".into()),
+        text: Some("t".into()),
+        cc: Some("cc@x.dev".into()),
+        bcc: Some(vec!["bcc@x.dev"].into()),
+        reply_to: Some("r@x.dev".into()),
+        scheduled_at: Some("2999-01-01T00:00:00Z".into()),
+        tags: Some(vec![Tag {
+            name: "k".into(),
+            value: "v".into(),
+        }]),
+        topic_id: Some("t1".into()),
+        attachments: Some(vec![
+            Attachment {
+                filename: "a.txt".into(),
+                content: Some("aGk=".into()),
+                content_type: Some("text/plain".into()),
+                content_id: Some("cid".into()),
+                path: None,
+            },
+            Attachment {
+                filename: "b.pdf".into(),
+                path: Some("https://x.dev/b.pdf".into()),
+                ..Default::default()
+            },
+        ]),
+        headers: Some(std::collections::HashMap::from([(
+            "X-Entity-Ref-ID".to_string(),
+            "123".to_string(),
+        )])),
+        template: Some(json!({ "id": "tpl_1", "variables": { "name": "Ada" } })),
+    };
+    assert_eq!(ms.emails.send(&email).await.unwrap().id, "abc");
+}
+
+#[tokio::test]
+async fn emails_send_accepts_resend_shaped_idempotency_key() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails"))
+        .and(header("idempotency-key", "key-1"))
+        .respond_with(ok_json(json!({ "id": "abc" })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let email = SendEmailOptions::new("a@x.dev", "b@x.dev", "s");
+    let res = ms
+        .emails
+        .send(email.with_idempotency_key("key-1"))
+        .await
+        .unwrap();
+    assert_eq!(res.id, "abc");
+}
+
+#[tokio::test]
+async fn batch_send_with_validation_sends_header_and_types_errors() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails/batch"))
+        .and(header("x-batch-validation", "permissive"))
+        .and(header("idempotency-key", "batch-2"))
+        .and(body_json(json!([
+            { "from": "a@x.dev", "to": "b@x.dev", "subject": "1", "text": "one" },
+            { "from": "a@x.dev", "to": "not-an-email", "subject": "2", "text": "two" }
+        ])))
+        .respond_with(ok_json(json!({
+            "data": [{ "id": "1" }],
+            "errors": [{ "index": 1, "message": "to: invalid email" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let mut one = SendEmailOptions::new("a@x.dev", "b@x.dev", "1");
+    one.text = Some("one".into());
+    let mut two = SendEmailOptions::new("a@x.dev", "not-an-email", "2");
+    two.text = Some("two".into());
+    let emails = [one, two];
+    let res = ms
+        .batch
+        .send_with_batch_validation(
+            emails.with_idempotency_key("batch-2"),
+            BatchValidation::Permissive,
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.data.len(), 1);
+    assert_eq!(
+        res.errors,
+        vec![BatchError {
+            index: 1,
+            message: "to: invalid email".into()
+        }]
+    );
+}
+
+#[tokio::test]
+async fn batch_send_accepts_arrays_and_vecs_without_headers() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails/batch"))
+        .respond_with(ok_json(json!({ "data": [{ "id": "1" }] })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let one = SendEmailOptions::new("a@x.dev", "b@x.dev", "1");
+    let pair = [one.clone(), one.clone()];
+    let res = ms.batch.send(&pair).await.unwrap();
+    assert!(res.errors.is_empty());
+    ms.batch.send(&pair.to_vec()).await.unwrap();
+    ms.batch
+        .send_with_batch_validation(&[one], BatchValidation::Strict)
+        .await
+        .unwrap();
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.len(), 3);
+    assert!(requests[0].headers.get("idempotency-key").is_none());
+    assert!(requests[0].headers.get("x-batch-validation").is_none());
+    assert_eq!(
+        requests[2].headers.get("x-batch-validation").unwrap(),
+        "strict"
+    );
+}
+
+#[tokio::test]
+async fn emails_update_list_and_delete_hit_the_right_paths() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/emails/e1"))
+        .and(body_json(json!({ "scheduled_at": "2999-01-02T00:00:00Z" })))
+        .respond_with(ok_json(json!({ "object": "email", "id": "e1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/emails"))
+        .and(query_param("limit", "5"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{
+                "id": "e1", "from": "a@x.dev", "to": ["b@x.dev"], "cc": null, "bcc": null,
+                "reply_to": null, "subject": "s", "created_at": "2026-01-01T00:00:00Z",
+                "scheduled_at": null, "last_event": "delivered"
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/emails/e1"))
+        .respond_with(ok_json(
+            json!({ "object": "email", "id": "e1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let changes = UpdateEmailOptions {
+        scheduled_at: "2999-01-02T00:00:00Z".into(),
+    };
+    assert_eq!(ms.emails.update("e1", &changes).await.unwrap().id, "e1");
+    let options = ListOptions {
+        limit: Some(5),
+        ..Default::default()
+    };
+    let list = ms.emails.list(Some(&options)).await.unwrap();
+    assert_eq!(list.data[0].last_event, "delivered");
+    assert!(ms.emails.delete("e1").await.unwrap().deleted);
+}
+
+#[tokio::test]
+async fn contacts_create_puts_every_field_on_the_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contacts"))
+        .and(body_json(json!({
+            "email": "c@x.dev",
+            "first_name": "Ada",
+            "last_name": "Lovelace",
+            "unsubscribed": false,
+            "properties": { "plan": "pro", "seats": 3 },
+            "segments": [{ "id": "s1" }],
+            "topics": [{ "id": "t1", "subscription": "opt_in" }]
+        })))
+        .respond_with(ok_json(json!({ "object": "contact", "id": "c1" })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let contact = CreateContactOptions {
+        email: "c@x.dev".into(),
+        first_name: Some("Ada".into()),
+        last_name: Some("Lovelace".into()),
+        unsubscribed: Some(false),
+        properties: Some(std::collections::HashMap::from([
+            ("plan".to_string(), json!("pro")),
+            ("seats".to_string(), json!(3)),
+        ])),
+        segments: Some(vec![SegmentRef { id: "s1".into() }]),
+        topics: Some(vec![ContactTopicUpdate {
+            id: "t1".into(),
+            subscription: TopicSubscription::OptIn,
+        }]),
+    };
+    assert_eq!(ms.contacts.create(&contact).await.unwrap().id, "c1");
+}
+
+#[tokio::test]
+async fn contacts_create_batch_sends_query_header_and_typed_response() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch"))
+        .and(query_param("on_conflict", "upsert"))
+        .and(header("x-batch-validation", "permissive"))
+        .and(body_json(json!([
+            { "email": "a@x.dev", "first_name": "Ada" },
+            { "email": "bad" }
+        ])))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "contact", "index": 0, "id": "c1", "status": "updated" }],
+            "counts": { "created": 0, "updated": 1, "skipped": 0, "failed": 1 },
+            "errors": [{ "index": 1, "message": "email: invalid" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let mut ada = CreateContactOptions::new("a@x.dev");
+    ada.first_name = Some("Ada".into());
+    let options = BatchContactsOptions {
+        on_conflict: Some(OnConflict::Upsert),
+        batch_validation: Some(BatchValidation::Permissive),
+    };
+    let res = ms
+        .contacts
+        .create_batch(&[ada, CreateContactOptions::new("bad")], Some(&options))
+        .await
+        .unwrap();
+    assert_eq!(res.data[0].status, BatchContactStatus::Updated);
+    assert_eq!(res.data[0].index, 0);
+    assert_eq!(res.counts.failed, 1);
+    assert_eq!(res.errors[0].index, 1);
+}
+
+#[tokio::test]
+async fn contacts_create_batch_defaults_omit_query_and_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch"))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "contact", "index": 0, "id": "c1", "status": "created" }],
+            "counts": { "created": 1, "updated": 0, "skipped": 0, "failed": 0 }
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let res = ms
+        .contacts
+        .create_batch(&[CreateContactOptions::new("a@x.dev")], None)
+        .await
+        .unwrap();
+    assert!(res.errors.is_empty());
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[0].url.query(), None);
+    assert!(requests[0].headers.get("x-batch-validation").is_none());
+}
+
+#[tokio::test]
+async fn contact_segments_add_and_remove() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/c1/segments/s1"))
+        .respond_with(ok_json(json!({ "id": "c1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path_regex(r"^/contacts/c(%40|@)x\.dev/segments/s1$"))
+        .respond_with(ok_json(
+            json!({ "id": "c1", "audienceId": "s1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    assert_eq!(ms.contacts.segments.add("c1", "s1").await.unwrap().id, "c1");
+    let removed = ms
+        .contacts
+        .segments
+        .remove(ContactAddress::email("c@x.dev"), "s1")
+        .await
+        .unwrap();
+    assert_eq!(removed.audience_id, "s1");
+    assert!(removed.deleted);
+}
+
+#[tokio::test]
+async fn contact_properties_cover_create_get_list_update_delete() {
+    let server = MockServer::start().await;
+    let property = json!({
+        "object": "contact_property", "id": "p1", "key": "plan", "type": "string",
+        "fallback_value": "free", "created_at": "2026-01-01T00:00:00Z"
+    });
+    Mock::given(method("POST"))
+        .and(path("/contact-properties"))
+        .and(body_json(
+            json!({ "key": "plan", "type": "string", "fallback_value": "free" }),
+        ))
+        .respond_with(ok_json(property.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/contact-properties/p1"))
+        .respond_with(ok_json(property.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/contact-properties"))
+        .and(query_param("limit", "10"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "p2", "key": "seats", "type": "number", "fallback_value": null,
+                       "created_at": "2026-01-01T00:00:00Z" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/contact-properties/p1"))
+        .and(body_json(json!({ "fallback_value": null })))
+        .respond_with(ok_json(json!({ "object": "contact_property", "id": "p1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/contact-properties/p1"))
+        .respond_with(ok_json(
+            json!({ "object": "contact_property", "id": "p1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let created = ms
+        .contacts
+        .properties
+        .create(&CreateContactPropertyOptions {
+            key: "plan".into(),
+            r#type: ContactPropertyType::String,
+            fallback_value: Some(json!("free")),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.id, "p1");
+    assert_eq!(created.fallback_value, Some(json!("free")));
+    assert_eq!(
+        ms.contacts.properties.get("p1").await.unwrap().r#type,
+        ContactPropertyType::String
+    );
+    let options = ListOptions {
+        limit: Some(10),
+        ..Default::default()
+    };
+    let list = ms.contacts.properties.list(Some(&options)).await.unwrap();
+    assert_eq!(list.data[0].r#type, ContactPropertyType::Number);
+    assert_eq!(list.data[0].fallback_value, None);
+    let cleared = UpdateContactPropertyOptions {
+        fallback_value: Some(serde_json::Value::Null),
+    };
+    assert_eq!(
+        ms.contacts
+            .properties
+            .update("p1", &cleared)
+            .await
+            .unwrap()
+            .id,
+        "p1"
+    );
+    assert!(ms.contacts.properties.delete("p1").await.unwrap().deleted);
+}
+
+#[tokio::test]
+async fn broadcasts_create_puts_every_field_on_the_wire() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/broadcasts"))
+        .and(body_json(json!({
+            "name": "Launch",
+            "segment_id": "s1",
+            "from": "Acme <news@x.dev>",
+            "subject": "News",
+            "html": "<p>hi</p>",
+            "text": "hi",
+            "reply_to": ["r@x.dev"],
+            "preview_text": "Preheader",
+            "topic_id": "t1",
+            "send": true,
+            "scheduled_at": "in 1 hour"
+        })))
+        .respond_with(ok_json(json!({ "id": "b1" })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let create = CreateBroadcastOptions {
+        name: Some("Launch".into()),
+        segment_id: Some("s1".into()),
+        from: "Acme <news@x.dev>".into(),
+        subject: "News".into(),
+        html: Some("<p>hi</p>".into()),
+        text: Some("hi".into()),
+        reply_to: Some(vec!["r@x.dev"].into()),
+        preview_text: Some("Preheader".into()),
+        topic_id: Some("t1".into()),
+        send: Some(true),
+        scheduled_at: Some("in 1 hour".into()),
+    };
+    assert_eq!(ms.broadcasts.create(&create).await.unwrap().id, "b1");
+}
+
+#[tokio::test]
+async fn broadcasts_update_sets_or_clears_topic_id() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/broadcasts/b1"))
+        .and(body_json(json!({ "preview_text": "p", "topic_id": "t2" })))
+        .respond_with(ok_json(json!({ "id": "b1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/broadcasts/b2"))
+        .and(body_json(json!({ "subject": "x", "topic_id": null })))
+        .respond_with(ok_json(json!({ "id": "b2" })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let set = UpdateBroadcastOptions {
+        preview_text: Some("p".into()),
+        topic_id: Some("t2".into()),
+        ..Default::default()
+    };
+    assert_eq!(ms.broadcasts.update("b1", &set).await.unwrap().id, "b1");
+    let clear = UpdateBroadcastOptions {
+        subject: Some("x".into()),
+        topic_id: Some("ignored".into()),
+        clear_topic_id: true,
+        ..Default::default()
+    };
+    assert_eq!(ms.broadcasts.update("b2", &clear).await.unwrap().id, "b2");
+}
+
+#[tokio::test]
+async fn topics_update_and_visibility() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/topics"))
+        .and(body_json(json!({
+            "name": "Product", "description": "d", "default_subscription": "opt_out",
+            "visibility": "public"
+        })))
+        .respond_with(ok_json(json!({ "id": "t1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/topics/t1"))
+        .and(body_json(
+            json!({ "name": "Renamed", "visibility": "private" }),
+        ))
+        .respond_with(ok_json(json!({ "id": "t1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/topics/t1"))
+        .respond_with(ok_json(json!({
+            "id": "t1", "name": "Renamed", "default_subscription": "opt_out",
+            "visibility": "private", "created_at": "2026-01-01T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let mut topic = CreateTopicOptions::new("Product", TopicSubscription::OptOut);
+    topic.description = Some("d".into());
+    topic.visibility = Some(TopicVisibility::Public);
+    assert_eq!(ms.topics.create(&topic).await.unwrap().id, "t1");
+    let changes = UpdateTopicOptions {
+        name: Some("Renamed".into()),
+        visibility: Some(TopicVisibility::Private),
+        ..Default::default()
+    };
+    assert_eq!(ms.topics.update("t1", &changes).await.unwrap().id, "t1");
+    assert_eq!(
+        ms.topics.get("t1").await.unwrap().visibility,
+        Some(TopicVisibility::Private)
+    );
+}
+
+#[tokio::test]
+async fn segments_manual_segment_parses_null_filter_and_lists_contacts() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/segments/s1"))
+        .respond_with(ok_json(json!({
+            "object": "segment", "id": "s1", "name": "VIPs", "filter": null,
+            "created_at": "2026-01-01T00:00:00Z", "contact_count": 2
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/segments/s1/contacts"))
+        .and(query_param("after", "cur"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "c1", "email": "c@x.dev", "first_name": null, "last_name": null,
+                       "created_at": "2026-01-01T00:00:00Z", "unsubscribed": false }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let segment = ms.segments.get("s1").await.unwrap();
+    assert!(segment.filter.is_none());
+    let options = ListOptions {
+        after: Some("cur".into()),
+        ..Default::default()
+    };
+    let members = ms
+        .segments
+        .list_contacts("s1", Some(&options))
+        .await
+        .unwrap();
+    assert_eq!(members.data[0].email, "c@x.dev");
+}
+
+// ---- suppressions --------------------------------------------------------
+
+#[tokio::test]
+async fn suppressions_cover_add_get_list_remove_and_batches() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/suppressions"))
+        .and(body_json(
+            json!({ "email": "x@x.dev", "origin": "unsubscribe" }),
+        ))
+        .respond_with(ok_json(json!({ "object": "suppression", "id": "sp1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path_regex(r"^/suppressions/x(%40|@)x\.dev$"))
+        .respond_with(ok_json(json!({
+            "object": "suppression", "id": "sp1", "email": "x@x.dev", "origin": "bounce",
+            "source_id": "e1", "created_at": "2026-01-01T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/suppressions"))
+        .and(query_param("limit", "2"))
+        .and(query_param("origin", "complaint"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "sp2", "email": "y@x.dev", "origin": "complaint", "source_id": null,
+                       "created_at": "2026-01-01T00:00:00Z" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/suppressions/sp1"))
+        .respond_with(ok_json(
+            json!({ "object": "suppression", "id": "sp1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/suppressions/batch/add"))
+        .and(body_json(
+            json!({ "emails": ["a@x.dev", "b@x.dev"], "origin": "manual" }),
+        ))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "suppression", "id": "sp3" }, { "object": "suppression", "id": "sp4" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/suppressions/batch/remove"))
+        .and(body_json(json!({ "emails": ["a@x.dev"] })))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "suppression", "id": "sp3", "deleted": true }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/suppressions/batch/remove"))
+        .and(body_json(json!({ "ids": ["sp4"] })))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "suppression", "id": "sp4", "deleted": true }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let mut add = AddSuppressionOptions::new("x@x.dev");
+    add.origin = Some(SuppressionOrigin::Unsubscribe);
+    assert_eq!(ms.suppressions.add(&add).await.unwrap().id, "sp1");
+    let got = ms.suppressions.get("x@x.dev").await.unwrap();
+    assert_eq!(got.origin, SuppressionOrigin::Bounce);
+    assert_eq!(got.source_id.as_deref(), Some("e1"));
+    let options = ListSuppressionsOptions {
+        limit: Some(2),
+        origin: Some(SuppressionOrigin::Complaint),
+        ..Default::default()
+    };
+    let list = ms.suppressions.list(Some(&options)).await.unwrap();
+    assert_eq!(list.data[0].origin, SuppressionOrigin::Complaint);
+    assert!(ms.suppressions.remove("sp1").await.unwrap().deleted);
+    let added = ms
+        .suppressions
+        .batch_add(&BatchAddSuppressionsOptions {
+            emails: vec!["a@x.dev".into(), "b@x.dev".into()],
+            origin: Some(SuppressionOrigin::Manual),
+        })
+        .await
+        .unwrap();
+    assert_eq!(added.data.len(), 2);
+    let by_email = ms
+        .suppressions
+        .batch_remove(&BatchRemoveSuppressionsOptions::Emails(vec![
+            "a@x.dev".into()
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(by_email.data[0].id, "sp3");
+    let by_id = ms
+        .suppressions
+        .batch_remove(&BatchRemoveSuppressionsOptions::Ids(vec!["sp4".into()]))
+        .await
+        .unwrap();
+    assert!(by_id.data[0].deleted);
+}
+
+// ---- domains -------------------------------------------------------------
+
+#[tokio::test]
+async fn domains_cover_create_get_list_verify_update_delete() {
+    let server = MockServer::start().await;
+    let domain = json!({
+        "object": "domain", "id": "d1", "name": "x.dev", "status": "pending",
+        "created_at": "2026-01-01T00:00:00Z", "region": "us-east-1",
+        "open_tracking": true, "click_tracking": false, "tracking_subdomain": "links",
+        "capabilities": { "sending": "enabled", "receiving": "disabled" },
+        "records": [
+            { "record": "DKIM", "name": "k._domainkey", "type": "TXT", "ttl": "Auto",
+              "status": "pending", "value": "p=abc" },
+            { "record": "SPF", "name": "send", "type": "MX", "ttl": "Auto",
+              "status": "pending", "value": "feedback-smtp.amazonses.com", "priority": 10 }
+        ]
+    });
+    Mock::given(method("POST"))
+        .and(path("/domains"))
+        .and(body_json(json!({
+            "name": "x.dev", "region": "us-east-1", "custom_return_path": "send",
+            "open_tracking": true, "click_tracking": false, "tracking_subdomain": "links"
+        })))
+        .respond_with(ok_json(domain.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/domains/d1"))
+        .respond_with(ok_json(domain.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/domains"))
+        .and(query_param("limit", "3"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{
+                "id": "d1", "name": "x.dev", "status": "verified",
+                "created_at": "2026-01-01T00:00:00Z", "region": "us-east-1",
+                "open_tracking": false, "click_tracking": false, "tracking_subdomain": null,
+                "capabilities": { "sending": "enabled", "receiving": "disabled" }
+            }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/domains/d1/verify"))
+        .respond_with(ok_json(domain.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/domains/d1"))
+        .and(body_json(
+            json!({ "click_tracking": true, "tracking_subdomain": null }),
+        ))
+        .respond_with(ok_json(domain.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/domains/d1"))
+        .respond_with(ok_json(
+            json!({ "object": "domain", "id": "d1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let create = CreateDomainOptions {
+        name: "x.dev".into(),
+        region: Some("us-east-1".into()),
+        custom_return_path: Some("send".into()),
+        open_tracking: Some(true),
+        click_tracking: Some(false),
+        tracking_subdomain: Some("links".into()),
+    };
+    let created = ms.domains.create(&create).await.unwrap();
+    assert_eq!(created.records.len(), 2);
+    assert_eq!(created.records[0].priority, None);
+    assert_eq!(created.records[1].priority, Some(10));
+    assert_eq!(created.capabilities.sending, "enabled");
+    assert_eq!(
+        ms.domains
+            .get("d1")
+            .await
+            .unwrap()
+            .tracking_subdomain
+            .as_deref(),
+        Some("links")
+    );
+    let options = ListOptions {
+        limit: Some(3),
+        ..Default::default()
+    };
+    let list = ms.domains.list(Some(&options)).await.unwrap();
+    assert!(list.data[0].records.is_empty());
+    assert_eq!(ms.domains.verify("d1").await.unwrap().status, "pending");
+    let changes = UpdateDomainOptions {
+        click_tracking: Some(true),
+        tracking_subdomain: Some(None),
+        ..Default::default()
+    };
+    assert_eq!(ms.domains.update("d1", &changes).await.unwrap().id, "d1");
+    assert!(ms.domains.delete("d1").await.unwrap().deleted);
+}
+
+// ---- webhooks ------------------------------------------------------------
+
+#[tokio::test]
+async fn webhooks_cover_create_get_list_update_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks"))
+        .and(body_json(json!({
+            "endpoint": "https://x.dev/hook",
+            "events": ["email.delivered", "email.bounced"],
+            "signing_secret": "whsec_abc"
+        })))
+        .respond_with(ok_json(
+            json!({ "object": "webhook", "id": "w1", "signing_secret": "whsec_abc" }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/webhooks/w1"))
+        .respond_with(ok_json(json!({
+            "object": "webhook", "id": "w1", "endpoint": "https://x.dev/hook",
+            "created_at": "2026-01-01T00:00:00Z", "status": "enabled",
+            "events": ["email.delivered"], "signing_secret": "whsec_abc"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/webhooks"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "w1", "endpoint": "https://x.dev/hook",
+                       "created_at": "2026-01-01T00:00:00Z", "status": "disabled", "events": null }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/webhooks/w1"))
+        .and(body_json(json!({
+            "endpoint": "https://x.dev/hook2", "events": ["email.opened"], "status": "disabled"
+        })))
+        .respond_with(ok_json(json!({ "object": "webhook", "id": "w1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/webhooks/w1"))
+        .respond_with(ok_json(
+            json!({ "object": "webhook", "id": "w1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let created = ms
+        .webhooks
+        .create(&CreateWebhookOptions {
+            endpoint: "https://x.dev/hook".into(),
+            events: vec!["email.delivered".into(), "email.bounced".into()],
+            signing_secret: Some("whsec_abc".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.signing_secret, "whsec_abc");
+    let got = ms.webhooks.get("w1").await.unwrap();
+    assert_eq!(got.status, WebhookStatus::Enabled);
+    assert_eq!(got.signing_secret.as_deref(), Some("whsec_abc"));
+    let list = ms.webhooks.list(None).await.unwrap();
+    assert_eq!(list.data[0].status, WebhookStatus::Disabled);
+    assert!(list.data[0].events.is_none());
+    assert!(list.data[0].signing_secret.is_none());
+    let changes = UpdateWebhookOptions {
+        endpoint: Some("https://x.dev/hook2".into()),
+        events: Some(vec!["email.opened".into()]),
+        status: Some(WebhookStatus::Disabled),
+    };
+    assert_eq!(ms.webhooks.update("w1", &changes).await.unwrap().id, "w1");
+    assert!(ms.webhooks.delete("w1").await.unwrap().deleted);
+}
+
+// ---- api keys ------------------------------------------------------------
+
+#[tokio::test]
+async fn api_keys_cover_create_list_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/api-keys"))
+        .and(body_json(
+            json!({ "name": "ci", "permission": "sending_access", "domain_id": "d1" }),
+        ))
+        .respond_with(ok_json(json!({ "id": "k1", "token": "ms_secret" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api-keys"))
+        .and(query_param("before", "cur"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "k1", "name": "ci", "created_at": "2026-01-01T00:00:00Z",
+                       "last_used_at": null }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/api-keys/k1"))
+        .respond_with(ok_json(
+            json!({ "object": "api_key", "id": "k1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let created = ms
+        .api_keys
+        .create(&CreateApiKeyOptions {
+            name: "ci".into(),
+            permission: Some(ApiKeyPermission::SendingAccess),
+            domain_id: Some("d1".into()),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.token, "ms_secret");
+    let options = ListOptions {
+        before: Some("cur".into()),
+        ..Default::default()
+    };
+    let list = ms.api_keys.list(Some(&options)).await.unwrap();
+    assert_eq!(list.data[0].name, "ci");
+    assert!(list.data[0].last_used_at.is_none());
+    assert!(ms.api_keys.delete("k1").await.unwrap().deleted);
+}
+
+// ---- templates -----------------------------------------------------------
+
+#[tokio::test]
+async fn templates_cover_the_full_lifecycle() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/templates"))
+        .and(body_json(json!({
+            "name": "Welcome", "html": "<p>Hi {{{FIRST_NAME|there}}}</p>",
+            "subject": "Welcome!", "text": "Hi", "alias": "welcome"
+        })))
+        .respond_with(ok_json(json!({ "object": "template", "id": "tp1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/templates/welcome"))
+        .respond_with(ok_json(json!({
+            "object": "template", "id": "tp1", "name": "Welcome", "alias": "welcome",
+            "status": "published", "published_at": "2026-01-01T00:00:00Z",
+            "created_at": "2026-01-01T00:00:00Z", "updated_at": "2026-01-01T00:00:00Z",
+            "current_version_id": "v1", "from": null, "subject": "Welcome!", "reply_to": null,
+            "html": "<p>Hi</p>", "text": "Hi", "variables": [], "has_unpublished_versions": false
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/templates"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "tp1", "name": "Welcome", "alias": null, "status": "published",
+                       "published_at": "2026-01-01T00:00:00Z", "created_at": "2026-01-01T00:00:00Z",
+                       "updated_at": "2026-01-01T00:00:00Z" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/templates/tp1"))
+        .and(body_json(json!({
+            "name": "Welcome v2", "subject": "Hello", "text": null, "alias": null
+        })))
+        .respond_with(ok_json(json!({ "object": "template", "id": "tp1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/templates/tp1/publish"))
+        .respond_with(ok_json(json!({ "object": "template", "id": "tp1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/templates/tp1/duplicate"))
+        .respond_with(ok_json(json!({ "object": "template", "id": "tp2" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/templates/tp1"))
+        .respond_with(ok_json(
+            json!({ "object": "template", "id": "tp1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let mut create = CreateTemplateOptions::new("Welcome", "<p>Hi {{{FIRST_NAME|there}}}</p>");
+    create.subject = Some("Welcome!".into());
+    create.text = Some("Hi".into());
+    create.alias = Some("welcome".into());
+    assert_eq!(ms.templates.create(&create).await.unwrap().id, "tp1");
+    let got = ms.templates.get("welcome").await.unwrap();
+    assert_eq!(got.current_version_id, "v1");
+    assert_eq!(got.subject.as_deref(), Some("Welcome!"));
+    assert!(got.reply_to.is_none());
+    assert!(got.variables.is_empty());
+    assert!(ms.templates.list(None).await.unwrap().data[0]
+        .alias
+        .is_none());
+    let changes = UpdateTemplateOptions {
+        name: Some("Welcome v2".into()),
+        subject: Some(Some("Hello".into())),
+        text: Some(None),
+        alias: Some(None),
+        ..Default::default()
+    };
+    assert_eq!(
+        ms.templates.update("tp1", &changes).await.unwrap().id,
+        "tp1"
+    );
+    assert_eq!(ms.templates.publish("tp1").await.unwrap().id, "tp1");
+    assert_eq!(ms.templates.duplicate("tp1").await.unwrap().id, "tp2");
+    assert!(ms.templates.delete("tp1").await.unwrap().deleted);
+}
+
+// ---- usage ---------------------------------------------------------------
+
+#[tokio::test]
+async fn usage_get_maps_report() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ok_json(json!({
+            "object": "usage", "cloud": true, "plan": "pro",
+            "limits": { "emails_per_day": 50000, "domains": null },
+            "today": { "emails_sent": 120, "resets_at": "2026-01-02T00:00:00Z" },
+            "team": { "id": "team1", "name": "Acme" },
+            "app_url": "https://app.x.dev"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let usage = ms.usage.get().await.unwrap();
+    assert!(usage.cloud);
+    assert_eq!(usage.plan.as_deref(), Some("pro"));
+    assert_eq!(usage.limits.emails_per_day, Some(50000));
+    assert_eq!(usage.limits.domains, None);
+    assert_eq!(usage.today.emails_sent, 120);
+    assert_eq!(usage.team.name, "Acme");
+    assert_eq!(usage.app_url.as_deref(), Some("https://app.x.dev"));
+}

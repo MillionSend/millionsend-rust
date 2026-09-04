@@ -8,7 +8,7 @@ use std::collections::HashMap;
 
 /// A recipient field that accepts a single address or a list — serializes as a
 /// bare string or a JSON array to match the wire's `string | string[]`.
-#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+#[derive(Debug, Clone, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(untagged)]
 pub enum Recipients {
     One(String),
@@ -55,6 +55,85 @@ impl<const N: usize> From<[&str; N]> for Recipients {
 pub struct Tag {
     pub name: String,
     pub value: String,
+}
+
+// ---- request options shared across resources -----------------------------
+
+/// A request body paired with an optional `Idempotency-Key`. Any body converts
+/// implicitly (`ms.emails.send(&email)`); attach a key with
+/// [`with_idempotency_key`](IdempotentTrait::with_idempotency_key).
+#[derive(Debug, Clone)]
+pub struct Idempotent<T> {
+    pub data: T,
+    pub idempotency_key: Option<String>,
+}
+
+impl<T> From<T> for Idempotent<T> {
+    fn from(data: T) -> Self {
+        Idempotent {
+            data,
+            idempotency_key: None,
+        }
+    }
+}
+
+impl<'a, T, const N: usize> From<&'a [T; N]> for Idempotent<&'a [T]> {
+    fn from(data: &'a [T; N]) -> Self {
+        Idempotent::from(data.as_slice())
+    }
+}
+
+impl<'a, T> From<&'a Vec<T>> for Idempotent<&'a [T]> {
+    fn from(data: &'a Vec<T>) -> Self {
+        Idempotent::from(data.as_slice())
+    }
+}
+
+/// Resend's idempotency shape: `ms.emails.send(email.with_idempotency_key("k"))`
+/// and `ms.batch.send(emails.with_idempotency_key("k"))`.
+pub trait IdempotentTrait: Sized {
+    fn with_idempotency_key(self, key: impl Into<String>) -> Idempotent<Self> {
+        Idempotent {
+            data: self,
+            idempotency_key: Some(key.into()),
+        }
+    }
+}
+
+impl IdempotentTrait for &SendEmailOptions {}
+impl IdempotentTrait for &[SendEmailOptions] {}
+
+/// `x-batch-validation` on batch endpoints. `Strict` (the server default)
+/// rejects the whole batch when one item is invalid; `Permissive` accepts the
+/// valid subset and lists the rest under `errors`.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum BatchValidation {
+    Strict,
+    Permissive,
+}
+
+impl BatchValidation {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            BatchValidation::Strict => "strict",
+            BatchValidation::Permissive => "permissive",
+        }
+    }
+}
+
+/// A per-item failure from a permissive batch, addressed by request index.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BatchError {
+    pub index: u32,
+    pub message: String,
+}
+
+/// `{ object, id, deleted: true }` — the envelope every `delete` returns.
+#[derive(Debug, Clone, Deserialize)]
+pub struct Deleted {
+    pub object: String,
+    pub id: String,
+    pub deleted: bool,
 }
 
 // ---- shared list envelope ------------------------------------------------
@@ -120,6 +199,33 @@ pub struct SendEmailOptions {
     pub scheduled_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<Tag>>,
+    /// Recipients opted out of the topic are skipped and an unsubscribe link
+    /// is added.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topic_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub attachments: Option<Vec<Attachment>>,
+    /// Extra message headers; transport headers are rejected by the API.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub headers: Option<HashMap<String, String>>,
+    /// Passed through untouched; the API currently answers 422 for any value.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub template: Option<serde_json::Value>,
+}
+
+/// An attachment. `content` is base64; `path` is passed through so the API,
+/// not the SDK, decides whether remote attachments are accepted.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Serialize)]
+pub struct Attachment {
+    pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_type: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub content_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub path: Option<String>,
 }
 
 impl SendEmailOptions {
@@ -204,9 +310,41 @@ pub struct CancelEmailResponse {
     pub id: String,
 }
 
+/// `PATCH /emails/:id` — reschedule a not-yet-sent email.
+#[derive(Debug, Clone, Serialize)]
+pub struct UpdateEmailOptions {
+    pub scheduled_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UpdateEmailResponse {
+    pub object: String,
+    pub id: String,
+}
+
+/// `GET /emails` item — the summary without bodies, `message_id` or `score`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct EmailListItem {
+    pub id: String,
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Option<Vec<String>>,
+    pub bcc: Option<Vec<String>>,
+    pub reply_to: Option<Vec<String>>,
+    pub subject: String,
+    pub created_at: String,
+    pub scheduled_at: Option<String>,
+    pub last_event: String,
+}
+
+pub type DeleteEmailResponse = Deleted;
+
+/// `errors` is only populated under [`BatchValidation::Permissive`].
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchResponse {
     pub data: Vec<CreateEmailResponse>,
+    #[serde(default)]
+    pub errors: Vec<BatchError>,
 }
 
 // ---- deliverability ------------------------------------------------------
@@ -248,6 +386,12 @@ pub struct CreateContactOptions {
     pub unsubscribed: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub properties: Option<HashMap<String, serde_json::Value>>,
+    /// Segments the contact joins on creation.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub segments: Option<Vec<SegmentRef>>,
+    /// Initial per-topic subscription choices.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub topics: Option<Vec<ContactTopicUpdate>>,
 }
 
 impl CreateContactOptions {
@@ -258,6 +402,135 @@ impl CreateContactOptions {
         }
     }
 }
+
+/// `{ id }` — a segment referenced from a contact payload.
+#[derive(Debug, Clone, PartialEq, Eq, Serialize)]
+pub struct SegmentRef {
+    pub id: String,
+}
+
+/// `on_conflict` for `POST /contacts/batch`: what happens to an item whose
+/// email already belongs to a contact (or repeats inside the batch).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum OnConflict {
+    /// Fail the item (server default).
+    Error,
+    /// Keep the existing contact and report its id.
+    Skip,
+    /// Merge the item into the existing contact.
+    Upsert,
+}
+
+impl OnConflict {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            OnConflict::Error => "error",
+            OnConflict::Skip => "skip",
+            OnConflict::Upsert => "upsert",
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default)]
+pub struct BatchContactsOptions {
+    pub on_conflict: Option<OnConflict>,
+    pub batch_validation: Option<BatchValidation>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchContactsResponse {
+    /// One entry per successful item, in request order.
+    pub data: Vec<BatchContactResult>,
+    pub counts: BatchContactsCounts,
+    /// Permissive mode only: the failed items by request index.
+    #[serde(default)]
+    pub errors: Vec<BatchError>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchContactResult {
+    pub object: String,
+    /// Position of the item in the request array.
+    pub index: u32,
+    /// The contact's id (the existing one for skipped/updated).
+    pub id: String,
+    pub status: BatchContactStatus,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchContactStatus {
+    Created,
+    Updated,
+    Skipped,
+}
+
+/// Per-status totals; they sum to the request length.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchContactsCounts {
+    pub created: u32,
+    pub updated: u32,
+    pub skipped: u32,
+    pub failed: u32,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct AddContactSegmentResponse {
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RemoveContactSegmentResponse {
+    /// The contact id.
+    pub id: String,
+    /// The segment id, under Resend's legacy wire name.
+    #[serde(rename = "audienceId")]
+    pub audience_id: String,
+    pub deleted: bool,
+}
+
+// ---- contact properties --------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactPropertyType {
+    String,
+    Number,
+}
+
+/// `fallback_value` is `Some(Value::Null)` to store an explicit null; its JSON
+/// type must match `type`.
+#[derive(Debug, Clone, Serialize)]
+pub struct CreateContactPropertyOptions {
+    pub key: String,
+    pub r#type: ContactPropertyType,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_value: Option<serde_json::Value>,
+}
+
+/// `None` leaves the fallback unchanged; `Some(Value::Null)` clears it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateContactPropertyOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub fallback_value: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContactProperty {
+    pub id: String,
+    pub key: String,
+    pub r#type: ContactPropertyType,
+    pub fallback_value: Option<serde_json::Value>,
+    pub created_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContactPropertyId {
+    pub object: String,
+    pub id: String,
+}
+
+pub type DeleteContactPropertyResponse = Deleted;
 
 /// Address a contact by id or email (email wins when both are set). A bare
 /// `&str`/`String` is treated as an id.
@@ -336,6 +609,8 @@ pub struct Contact {
     pub last_name: Option<String>,
     pub created_at: String,
     pub unsubscribed: bool,
+    /// Each value is a typed wrapper on the wire: `{ "type": "string", "value": "…" }`
+    /// or `{ "type": "number", "value": 1 }`.
     #[serde(default)]
     pub properties: HashMap<String, serde_json::Value>,
 }
@@ -377,12 +652,21 @@ pub struct UpdateContactTopicsResponse {
 
 // ---- topics --------------------------------------------------------------
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TopicVisibility {
+    Private,
+    Public,
+}
+
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateTopicOptions {
     pub name: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub description: Option<String>,
     pub default_subscription: TopicSubscription,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<TopicVisibility>,
 }
 
 impl CreateTopicOptions {
@@ -391,8 +675,19 @@ impl CreateTopicOptions {
             name: name.into(),
             description: None,
             default_subscription,
+            visibility: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateTopicOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub description: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub visibility: Option<TopicVisibility>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -402,6 +697,8 @@ pub struct Topic {
     #[serde(default)]
     pub description: Option<String>,
     pub default_subscription: TopicSubscription,
+    #[serde(default)]
+    pub visibility: Option<TopicVisibility>,
     pub created_at: String,
 }
 
@@ -441,10 +738,18 @@ pub struct CreateBroadcastOptions {
     pub text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<Recipients>,
-    // ponytail: cannot send an explicit null to clear topic_id; add Option<Option<String>>
-    // if a "detach topic" update is ever needed.
+    /// Inbox preview (preheader) text.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_text: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
+    /// `true` sends (or, with `scheduled_at`, schedules) immediately instead
+    /// of saving a draft.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send: Option<bool>,
+    /// Requires `send: true`; ISO 8601 with offset or relative ("in 1 hour").
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub scheduled_at: Option<String>,
 }
 
 impl CreateBroadcastOptions {
@@ -457,6 +762,8 @@ impl CreateBroadcastOptions {
     }
 }
 
+/// Fields default to "leave unchanged". To detach the topic set
+/// `clear_topic_id: true`, which puts `"topic_id": null` on the wire.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateBroadcastOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -474,7 +781,13 @@ pub struct UpdateBroadcastOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub reply_to: Option<Recipients>,
     #[serde(skip_serializing_if = "Option::is_none")]
+    pub preview_text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
+    /// Sends `"topic_id": null`; wins over `topic_id`. A flag rather than a
+    /// nested `Option` so `topic_id: Some(id)` keeps working.
+    #[serde(skip)]
+    pub clear_topic_id: bool,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -568,7 +881,9 @@ pub struct Segment {
     pub object: String,
     pub id: String,
     pub name: String,
-    pub filter: SegmentFilter,
+    /// `None` for a manual-membership segment (contacts added via
+    /// `contacts.segments.add`, no saved filter).
+    pub filter: Option<SegmentFilter>,
     pub created_at: String,
     /// Present on `get` (a live count); absent on `create`/`list`/`update`.
     #[serde(default)]
@@ -580,4 +895,435 @@ pub struct DeleteSegmentResponse {
     pub object: String,
     pub id: String,
     pub deleted: bool,
+}
+
+// ---- suppressions --------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum SuppressionOrigin {
+    Bounce,
+    Complaint,
+    Manual,
+    Unsubscribe,
+}
+
+impl SuppressionOrigin {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            SuppressionOrigin::Bounce => "bounce",
+            SuppressionOrigin::Complaint => "complaint",
+            SuppressionOrigin::Manual => "manual",
+            SuppressionOrigin::Unsubscribe => "unsubscribe",
+        }
+    }
+}
+
+/// `origin` defaults to `manual` server-side.
+#[derive(Debug, Clone, Serialize)]
+pub struct AddSuppressionOptions {
+    pub email: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SuppressionOrigin>,
+}
+
+impl AddSuppressionOptions {
+    pub fn new(email: impl Into<String>) -> Self {
+        AddSuppressionOptions {
+            email: email.into(),
+            origin: None,
+        }
+    }
+}
+
+/// [`ListOptions`] plus an optional `origin` filter.
+#[derive(Debug, Clone, Default)]
+pub struct ListSuppressionsOptions {
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub origin: Option<SuppressionOrigin>,
+}
+
+impl ListSuppressionsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        if let Some(origin) = self.origin {
+            query.push(("origin", origin.as_str().to_string()));
+        }
+        query
+    }
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct SuppressionId {
+    pub object: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Suppression {
+    pub id: String,
+    pub email: String,
+    pub origin: SuppressionOrigin,
+    /// Email id whose bounce/complaint created the entry.
+    pub source_id: Option<String>,
+    pub created_at: String,
+}
+
+pub type DeleteSuppressionResponse = Deleted;
+
+/// Up to 1000 addresses; duplicates collapse.
+#[derive(Debug, Clone, Serialize)]
+pub struct BatchAddSuppressionsOptions {
+    pub emails: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub origin: Option<SuppressionOrigin>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchAddSuppressionsResponse {
+    pub data: Vec<SuppressionId>,
+}
+
+/// Remove by addresses or by suppression ids (up to 1000 either way);
+/// serializes as `{ "emails": [...] }` or `{ "ids": [...] }`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchRemoveSuppressionsOptions {
+    Emails(Vec<String>),
+    Ids(Vec<String>),
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchRemoveSuppressionsResponse {
+    pub data: Vec<Deleted>,
+}
+
+// ---- domains -------------------------------------------------------------
+
+/// `region` is a plain string because each deployment serves its own SES
+/// region and rejects any other with 422; omit it to use the deployment's.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateDomainOptions {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub region: Option<String>,
+    /// MAIL FROM subdomain label (server default `send`).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub custom_return_path: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_tracking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub click_tracking: Option<bool>,
+    /// DNS label of the branded tracking host, e.g. `links` for `links.<domain>`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_subdomain: Option<String>,
+}
+
+impl CreateDomainOptions {
+    pub fn new(name: impl Into<String>) -> Self {
+        CreateDomainOptions {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// `tracking_subdomain`: `Some(Some(label))` sets, `Some(None)` clears (sends
+/// `null`), `None` leaves it. `tls`/`capabilities` are passed through; the API
+/// currently answers 422 for any value.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateDomainOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub open_tracking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub click_tracking: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tracking_subdomain: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub tls: Option<serde_json::Value>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub capabilities: Option<serde_json::Value>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Domain {
+    pub id: String,
+    pub name: String,
+    /// `not_started` | `pending` | `verified` | `failed` | … — kept a plain
+    /// string so new states never break deserialization.
+    pub status: String,
+    pub created_at: String,
+    pub region: String,
+    pub open_tracking: bool,
+    pub click_tracking: bool,
+    pub tracking_subdomain: Option<String>,
+    pub capabilities: DomainCapabilities,
+    /// DNS records to publish; absent on `list`.
+    #[serde(default)]
+    pub records: Vec<DomainRecord>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DomainCapabilities {
+    pub sending: String,
+    pub receiving: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct DomainRecord {
+    /// `SPF` | `DKIM` | `Tracking` | …
+    pub record: String,
+    pub name: String,
+    pub r#type: String,
+    pub ttl: String,
+    pub status: String,
+    pub value: String,
+    /// MX priority; only on MX records.
+    #[serde(default)]
+    pub priority: Option<u32>,
+}
+
+pub type DeleteDomainResponse = Deleted;
+
+// ---- api keys ------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ApiKeyPermission {
+    FullAccess,
+    SendingAccess,
+}
+
+/// `permission` defaults to `full_access`; `domain_id` restricts a
+/// `sending_access` key to one domain.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateApiKeyOptions {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub permission: Option<ApiKeyPermission>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_id: Option<String>,
+}
+
+impl CreateApiKeyOptions {
+    pub fn new(name: impl Into<String>) -> Self {
+        CreateApiKeyOptions {
+            name: name.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// The `token` is shown once, at creation.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKeyToken {
+    pub id: String,
+    pub token: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct ApiKey {
+    pub id: String,
+    pub name: String,
+    pub created_at: String,
+    pub last_used_at: Option<String>,
+}
+
+pub type DeleteApiKeyResponse = Deleted;
+
+// ---- webhooks ------------------------------------------------------------
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum WebhookStatus {
+    Enabled,
+    Disabled,
+}
+
+/// `events` are wire names (`email.delivered`, `deliverability.paused`, …),
+/// kept as strings because the catalog grows. `signing_secret` is optional:
+/// omit it to have one minted; pass `whsec_…` to reuse an existing one.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateWebhookOptions {
+    pub endpoint: String,
+    pub events: Vec<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct CreateWebhookResponse {
+    pub object: String,
+    pub id: String,
+    pub signing_secret: String,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateWebhookOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub endpoint: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub events: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub status: Option<WebhookStatus>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Webhook {
+    pub id: String,
+    pub endpoint: String,
+    pub created_at: String,
+    pub status: WebhookStatus,
+    pub events: Option<Vec<String>>,
+    /// Present on `get` only.
+    #[serde(default)]
+    pub signing_secret: Option<String>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct WebhookId {
+    pub object: String,
+    pub id: String,
+}
+
+pub type DeleteWebhookResponse = Deleted;
+
+// ---- templates -----------------------------------------------------------
+
+/// `from`, `reply_to` and `variables` are passed through; the API currently
+/// answers 422 when they are set.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateTemplateOptions {
+    pub name: String,
+    pub html: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    /// Case-sensitive handle, unique per team; `get`/`update`/`delete` accept
+    /// it in place of the id.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Vec<serde_json::Value>>,
+}
+
+impl CreateTemplateOptions {
+    pub fn new(name: impl Into<String>, html: impl Into<String>) -> Self {
+        CreateTemplateOptions {
+            name: name.into(),
+            html: html.into(),
+            ..Default::default()
+        }
+    }
+}
+
+/// For `subject`/`text`/`alias`, `Some(Some(v))` sets, `Some(None)` clears
+/// (sends `null`), `None` leaves the field unchanged.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateTemplateOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub alias: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub variables: Option<Vec<serde_json::Value>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TemplateId {
+    pub object: String,
+    pub id: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct TemplateListItem {
+    pub id: String,
+    pub name: String,
+    pub alias: Option<String>,
+    pub status: String,
+    pub published_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct Template {
+    pub object: String,
+    pub id: String,
+    pub name: String,
+    pub alias: Option<String>,
+    pub status: String,
+    pub published_at: String,
+    pub created_at: String,
+    pub updated_at: String,
+    pub current_version_id: String,
+    pub from: Option<String>,
+    pub subject: Option<String>,
+    pub reply_to: Option<Recipients>,
+    pub html: String,
+    pub text: Option<String>,
+    #[serde(default)]
+    pub variables: Vec<serde_json::Value>,
+    pub has_unpublished_versions: bool,
+}
+
+pub type DeleteTemplateResponse = Deleted;
+
+// ---- usage (MillionSend extension) ---------------------------------------
+
+/// `GET /usage` — plan limits and today's send count. Self-hosted instances
+/// report `cloud: false` with `plan: None` and null limits.
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageReport {
+    pub object: String,
+    pub cloud: bool,
+    /// `free` | `pro` | `scale`; `None` when self-hosted.
+    pub plan: Option<String>,
+    pub limits: UsageLimits,
+    pub today: UsageToday,
+    pub team: UsageTeam,
+    pub app_url: Option<String>,
+}
+
+/// `None` = unlimited (or self-hosted).
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageLimits {
+    pub emails_per_day: Option<u64>,
+    pub domains: Option<u64>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageToday {
+    /// Emails accepted so far this UTC day.
+    pub emails_sent: u64,
+    /// Next UTC midnight, when the counter resets.
+    pub resets_at: String,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct UsageTeam {
+    pub id: String,
+    pub name: String,
 }

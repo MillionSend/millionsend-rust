@@ -3,23 +3,31 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
-    list_query, Contact, ContactAddress, ContactId, ContactListItem, ContactTopicUpdate,
-    CreateContactOptions, DeleteContactResponse, List, ListOptions, UpdateContactOptions,
+    list_query, AddContactSegmentResponse, BatchContactsOptions, BatchContactsResponse,
+    BatchValidation, Contact, ContactAddress, ContactId, ContactListItem, ContactProperty,
+    ContactPropertyId, ContactTopicUpdate, CreateContactOptions, CreateContactPropertyOptions,
+    DeleteContactPropertyResponse, DeleteContactResponse, List, ListOptions,
+    RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
     UpdateContactTopicsResponse,
 };
 
 /// Contacts — team-global, addressable by id or email (email wins). Mirrors
-/// Resend's `contacts` resource, plus a nested `topics`.
+/// Resend's `contacts` resource, plus nested `topics`, `segments` and
+/// `properties`.
 #[derive(Clone)]
 pub struct Contacts {
     config: Arc<Config>,
     pub topics: ContactTopics,
+    pub segments: ContactSegments,
+    pub properties: ContactProperties,
 }
 
 impl Contacts {
     pub(crate) fn new(config: Arc<Config>) -> Self {
         Contacts {
             topics: ContactTopics(config.clone()),
+            segments: ContactSegments(config.clone()),
+            properties: ContactProperties(config.clone()),
             config,
         }
     }
@@ -27,7 +35,34 @@ impl Contacts {
     /// `POST /contacts` — 409 `validation_error` on a duplicate email
     /// (case-insensitive per team).
     pub async fn create(&self, contact: &CreateContactOptions) -> Result<ContactId> {
-        self.config.post(&["contacts"], contact, None).await
+        self.config.post(&["contacts"], contact).await
+    }
+
+    /// `POST /contacts/batch` — 1–1000 contacts in one request (MillionSend
+    /// extension). `on_conflict` and `batch_validation` default server-side to
+    /// `error` and `strict`.
+    pub async fn create_batch(
+        &self,
+        contacts: &[CreateContactOptions],
+        options: Option<&BatchContactsOptions>,
+    ) -> Result<BatchContactsResponse> {
+        let options = options.cloned().unwrap_or_default();
+        let query: Vec<_> = options
+            .on_conflict
+            .map(|c| ("on_conflict", c.as_str().to_string()))
+            .into_iter()
+            .collect();
+        self.config
+            .post_with(
+                &["contacts", "batch"],
+                &query,
+                contacts,
+                &[(
+                    "x-batch-validation",
+                    options.batch_validation.map(BatchValidation::as_str),
+                )],
+            )
+            .await
     }
 
     /// `GET /contacts/:idOrEmail`
@@ -78,5 +113,73 @@ impl ContactTopics {
         self.0
             .patch(&["contacts", address.key(), "topics"], topics)
             .await
+    }
+}
+
+/// Manual segment membership for one contact.
+#[derive(Clone)]
+pub struct ContactSegments(pub(crate) Arc<Config>);
+
+impl ContactSegments {
+    /// `POST /contacts/:idOrEmail/segments/:segmentId`
+    pub async fn add(
+        &self,
+        address: impl Into<ContactAddress>,
+        segment_id: &str,
+    ) -> Result<AddContactSegmentResponse> {
+        let address = address.into();
+        self.0
+            .post_empty(&["contacts", address.key(), "segments", segment_id])
+            .await
+    }
+
+    /// `DELETE /contacts/:idOrEmail/segments/:segmentId`
+    pub async fn remove(
+        &self,
+        address: impl Into<ContactAddress>,
+        segment_id: &str,
+    ) -> Result<RemoveContactSegmentResponse> {
+        let address = address.into();
+        self.0
+            .delete(&["contacts", address.key(), "segments", segment_id])
+            .await
+    }
+}
+
+/// Typed definitions for the keys of `contact.properties`
+/// (`/contact-properties`).
+#[derive(Clone)]
+pub struct ContactProperties(pub(crate) Arc<Config>);
+
+impl ContactProperties {
+    /// `POST /contact-properties`
+    pub async fn create(&self, property: &CreateContactPropertyOptions) -> Result<ContactProperty> {
+        self.0.post(&["contact-properties"], property).await
+    }
+
+    /// `GET /contact-properties/:id`
+    pub async fn get(&self, id: &str) -> Result<ContactProperty> {
+        self.0.get(&["contact-properties", id], &[]).await
+    }
+
+    /// `GET /contact-properties`
+    pub async fn list(&self, options: Option<&ListOptions>) -> Result<List<ContactProperty>> {
+        self.0
+            .get(&["contact-properties"], &list_query(options))
+            .await
+    }
+
+    /// `PATCH /contact-properties/:id`
+    pub async fn update(
+        &self,
+        id: &str,
+        changes: &UpdateContactPropertyOptions,
+    ) -> Result<ContactPropertyId> {
+        self.0.patch(&["contact-properties", id], changes).await
+    }
+
+    /// `DELETE /contact-properties/:id`
+    pub async fn delete(&self, id: &str) -> Result<DeleteContactPropertyResponse> {
+        self.0.delete(&["contact-properties", id]).await
     }
 }

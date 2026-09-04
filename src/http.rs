@@ -106,12 +106,27 @@ impl Config {
         &self,
         segments: &[&str],
         body: &B,
-        idempotency_key: Option<&str>,
     ) -> Result<T> {
-        let mut req = self.client.post(self.url(segments)).json(body);
-        // Idempotency is POST-only on the wire; only emails.send/batch.send pass it.
-        if let Some(key) = idempotency_key {
-            req = req.header("Idempotency-Key", key);
+        self.post_with(segments, &[], body, &[]).await
+    }
+
+    /// POST with query parameters and extra request headers (`Idempotency-Key`,
+    /// `x-batch-validation`); `None` header values are skipped.
+    pub(crate) async fn post_with<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&'static str, String)],
+        body: &B,
+        headers: &[(&'static str, Option<&str>)],
+    ) -> Result<T> {
+        let mut req = self
+            .client
+            .post(self.url_with_query(segments, query))
+            .json(body);
+        for (name, value) in headers {
+            if let Some(value) = value {
+                req = req.header(*name, *value);
+            }
         }
         self.run(req).await
     }

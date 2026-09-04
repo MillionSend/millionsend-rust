@@ -2,7 +2,7 @@ use std::sync::Arc;
 
 use serde::Serialize;
 
-use crate::error::Result;
+use crate::error::{Error, Result};
 use crate::http::Config;
 use crate::types::{
     list_query, Broadcast, BroadcastId, BroadcastListItem, CancelBroadcastResponse,
@@ -17,7 +17,7 @@ pub struct Broadcasts(pub(crate) Arc<Config>);
 impl Broadcasts {
     /// `POST /broadcasts`
     pub async fn create(&self, broadcast: &CreateBroadcastOptions) -> Result<BroadcastId> {
-        self.0.post(&["broadcasts"], broadcast, None).await
+        self.0.post(&["broadcasts"], broadcast).await
     }
 
     /// `GET /broadcasts/:id`
@@ -32,6 +32,11 @@ impl Broadcasts {
 
     /// `PATCH /broadcasts/:id` — draft only.
     pub async fn update(&self, id: &str, changes: &UpdateBroadcastOptions) -> Result<BroadcastId> {
+        if changes.clear_topic_id {
+            let mut body = serde_json::to_value(changes).map_err(Error::Parse)?;
+            body["topic_id"] = serde_json::Value::Null;
+            return self.0.patch(&["broadcasts", id], &body).await;
+        }
         self.0.patch(&["broadcasts", id], changes).await
     }
 
@@ -44,11 +49,7 @@ impl Broadcasts {
     /// timestamp to schedule.
     pub async fn send(&self, id: &str, scheduled_at: Option<&str>) -> Result<BroadcastId> {
         self.0
-            .post(
-                &["broadcasts", id, "send"],
-                &ScheduledAt { scheduled_at },
-                None,
-            )
+            .post(&["broadcasts", id, "send"], &ScheduledAt { scheduled_at })
             .await
     }
 

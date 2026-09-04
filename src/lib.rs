@@ -3,7 +3,8 @@
 //!
 //! Construct a [`MillionSend`] once and reuse it (it is cheap to [`Clone`]). Each
 //! resource hangs off a public field: `emails`, `batch`, `contacts`, `topics`,
-//! `broadcasts`, `segments`, `deliverability`.
+//! `broadcasts`, `segments`, `suppressions`, `domains`, `webhooks`, `api_keys`,
+//! `templates`, `deliverability`, `usage`.
 //!
 //! ```no_run
 //! use millionsend::{MillionSend, SendEmailOptions};
@@ -29,28 +30,40 @@
 //! API's `{ statusCode, name, message }`, [`Error::Http`] a transport failure
 //! (its [`status_code`](Error::status_code) is `None`).
 
+mod api_keys;
 mod broadcasts;
 mod contacts;
 mod deliverability;
+mod domains;
 mod emails;
 mod error;
 mod http;
 mod segments;
+mod suppressions;
+mod templates;
 mod topics;
 mod types;
+mod usage;
+mod webhooks;
 
 use std::sync::Arc;
 
 use http::Config;
 
+pub use api_keys::ApiKeys;
 pub use broadcasts::Broadcasts;
-pub use contacts::{ContactTopics, Contacts};
+pub use contacts::{ContactProperties, ContactSegments, ContactTopics, Contacts};
 pub use deliverability::Deliverability;
+pub use domains::Domains;
 pub use emails::{Batch, Emails};
 pub use error::{ApiError, Error, Result};
 pub use segments::Segments;
+pub use suppressions::Suppressions;
+pub use templates::Templates;
 pub use topics::Topics;
 pub use types::*;
+pub use usage::Usage;
+pub use webhooks::Webhooks;
 
 const DEFAULT_BASE_URL: &str = "http://localhost:3001";
 
@@ -63,7 +76,13 @@ pub struct MillionSend {
     pub topics: Topics,
     pub broadcasts: Broadcasts,
     pub segments: Segments,
+    pub suppressions: Suppressions,
+    pub domains: Domains,
+    pub webhooks: Webhooks,
+    pub api_keys: ApiKeys,
+    pub templates: Templates,
     pub deliverability: Deliverability,
+    pub usage: Usage,
 }
 
 impl MillionSend {
@@ -122,7 +141,13 @@ impl MillionSend {
             topics: Topics(config.clone()),
             broadcasts: Broadcasts(config.clone()),
             segments: Segments(config.clone()),
-            deliverability: Deliverability(config),
+            suppressions: Suppressions(config.clone()),
+            domains: Domains(config.clone()),
+            webhooks: Webhooks(config.clone()),
+            api_keys: ApiKeys(config.clone()),
+            templates: Templates(config.clone()),
+            deliverability: Deliverability(config.clone()),
+            usage: Usage(config),
         }
     }
 }
