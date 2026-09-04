@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.5"
+millionsend = "0.6"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -203,10 +203,10 @@ ms.contacts.list(Some(&ListOptions { limit: Some(20), ..Default::default() })).a
 `Contact.properties` values arrive as typed wrappers on the wire
 (`{ "type": "string", "value": "pro" }` / `{ "type": "number", "value": 3 }`).
 
-#### Batch create (MillionSend extension)
+#### Batch create and remove (MillionSend extensions)
 
 ```rust
-use millionsend::{BatchContactsOptions, BatchValidation, OnConflict};
+use millionsend::{BatchContactsOptions, BatchRemoveContactsOptions, BatchValidation, OnConflict};
 
 let res = ms.contacts.create_batch(&contacts, Some(&BatchContactsOptions {
     on_conflict: Some(OnConflict::Upsert),                 // error (default) | skip | upsert
@@ -219,7 +219,15 @@ for err in &res.errors { eprintln!("contacts.{}: {}", err.index, err.message); }
 Up to 1000 contacts per call; each `data` entry carries the request `index`,
 the contact `id` and a `status` (`created` | `updated` | `skipped`).
 
-#### Topic subscriptions and segment membership
+```rust
+ms.contacts.batch_remove(&BatchRemoveContactsOptions::Ids(vec![id])).await?;              // POST /contacts/batch/remove
+ms.contacts.batch_remove(&BatchRemoveContactsOptions::Emails(vec!["a@acme.dev".into()])).await?;
+```
+
+Exactly one of ids or emails, up to 1000; `data` lists only the contacts
+actually deleted (`{ object, contact, deleted }`), unknown ones are skipped.
+
+#### Topic subscriptions, segment membership and the preference page
 
 ```rust
 use millionsend::{ContactTopicUpdate, TopicSubscription};
@@ -232,11 +240,20 @@ ms.contacts.topics.update("contact-id", &[ContactTopicUpdate {
 
 ms.contacts.segments.add("contact-id", &segment.id).await?;     // POST   /contacts/:id/segments/:segmentId
 ms.contacts.segments.remove("contact-id", &segment.id).await?;  // DELETE /contacts/:id/segments/:segmentId
+
+let link = ms.contacts.preferences_link(ContactAddress::email("ada@acme.dev")).await?;
+println!("{}", link.url);                                       // POST /contacts/:idOrEmail/preferences-link
 ```
 
 `topics.list` returns every topic of the team (one page) with the contact's
-effective `subscription` — the explicit choice, else the topic default — and
-`explicit: false` when it is the default.
+effective `subscription` — the explicit choice, else the topic default —
+`explicit: false` when it is the default, and the topic's `visibility` (the
+hosted preference page lists public topics only).
+
+`preferences_link` (MillionSend extension) mints the contact's hosted
+preference page — the page their emails' unsubscribe links open. The URL never
+expires and lets its holder change that contact's preferences, so show it only
+to the contact. 422 when the instance cannot build hosted links.
 
 #### Contact properties
 
@@ -399,7 +416,7 @@ ms.domains.delete(&domain.id).await?;
 ### Webhooks
 
 ```rust
-use millionsend::{CreateWebhookOptions, UpdateWebhookOptions, WebhookStatus};
+use millionsend::{CreateWebhookOptions, RotateWebhookOptions, UpdateWebhookOptions, WebhookStatus};
 
 let hook = ms.webhooks.create(&CreateWebhookOptions {
     endpoint: "https://acme.dev/hooks/millionsend".into(),
@@ -409,13 +426,27 @@ let hook = ms.webhooks.create(&CreateWebhookOptions {
 println!("verify payloads with {}", hook.signing_secret);
 
 ms.webhooks.list(None).await?;
-ms.webhooks.get(&hook.id).await?;                          // includes signing_secret
+ms.webhooks.get(&hook.id).await?;                          // includes signing_secret, previous_secret_expires_at
 ms.webhooks.update(&hook.id, &UpdateWebhookOptions {
     status: Some(WebhookStatus::Disabled),
     ..Default::default()
 }).await?;
+
+let rotated = ms.webhooks.rotate(&hook.id, None).await?;   // POST /webhooks/:id/rotate with {}
+println!("switch to {} before {:?}", rotated.signing_secret, rotated.previous_secret_expires_at);
+ms.webhooks.rotate(&hook.id, Some(&RotateWebhookOptions {
+    signing_secret: Some("whsec_…".into()),                // bring your own
+    overlap_hours: Some(0),                                // 0–72, default 24; 0 drops the old secret at once
+})).await?;
 ms.webhooks.delete(&hook.id).await?;
 ```
+
+`rotate` (MillionSend extension) mints or takes a new signing secret; until
+`previous_secret_expires_at` every delivery carries both signatures, so the
+receiver can switch at any point in the window. Subscribable event names
+include `email.*`, `deliverability.*`, `contact.created`/`updated`/`deleted`/
+`unsubscribed`/`resubscribed`/`topic_opt_in`/`topic_opt_out` and
+`suppression.added`/`removed`.
 
 ### API keys
 
@@ -504,7 +535,8 @@ Resource and method names match: `emails`, `batch`, `contacts`, `topics`,
   filters or manual lists) to target a subset, or a broadcast with no
   `segment_id`/`topic_id` to reach everyone.
 - **MillionSend extensions** with no Resend counterpart: `segments`,
-  `contacts.create_batch`, `deliverability`, `usage`, `emails.get_insights`.
+  `contacts.create_batch`, `contacts.batch_remove`, `contacts.preferences_link`,
+  `webhooks.rotate`, `deliverability`, `usage`, `emails.get_insights`.
 - **Templates** are always published; `publish` is a no-op kept for
   compatibility, and `from`/`reply_to`/`variables` are rejected with 422.
 - **Nullable clears**: `Option<Option<T>>` fields (`Some(None)`) send JSON

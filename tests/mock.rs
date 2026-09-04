@@ -6,7 +6,7 @@
 use millionsend::*;
 use serde_json::json;
 use std::time::Duration;
-use wiremock::matchers::{body_json, header, method, path, path_regex, query_param};
+use wiremock::matchers::{body_json, body_string, header, method, path, path_regex, query_param};
 use wiremock::{Mock, MockServer, ResponseTemplate};
 
 fn ok_json(body: serde_json::Value) -> ResponseTemplate {
@@ -1587,7 +1587,8 @@ async fn webhooks_cover_create_get_list_update_delete() {
         .respond_with(ok_json(json!({
             "object": "webhook", "id": "w1", "endpoint": "https://x.dev/hook",
             "created_at": "2026-01-01T00:00:00Z", "status": "enabled",
-            "events": ["email.delivered"], "signing_secret": "whsec_abc"
+            "events": ["email.delivered"], "signing_secret": "whsec_abc",
+            "previous_secret_expires_at": null
         })))
         .mount(&server)
         .await;
@@ -1630,6 +1631,7 @@ async fn webhooks_cover_create_get_list_update_delete() {
     let got = ms.webhooks.get("w1").await.unwrap();
     assert_eq!(got.status, WebhookStatus::Enabled);
     assert_eq!(got.signing_secret.as_deref(), Some("whsec_abc"));
+    assert!(got.previous_secret_expires_at.is_none());
     let list = ms.webhooks.list(None).await.unwrap();
     assert_eq!(list.data[0].status, WebhookStatus::Disabled);
     assert!(list.data[0].events.is_none());
@@ -1853,9 +1855,9 @@ async fn contact_topics_list_gets_encoded_email_and_decodes_shape() {
             "object": "list", "has_more": false,
             "data": [
                 { "id": "t1", "name": "Insights", "description": "Weekly",
-                  "subscription": "opt_out", "explicit": true },
+                  "subscription": "opt_out", "explicit": true, "visibility": "public" },
                 { "id": "t2", "name": "Product", "description": null,
-                  "subscription": "opt_in", "explicit": false }
+                  "subscription": "opt_in", "explicit": false, "visibility": "private" }
             ]
         })))
         .mount(&server)
@@ -1876,7 +1878,9 @@ async fn contact_topics_list_gets_encoded_email_and_decodes_shape() {
     assert_eq!(topics.data[0].description.as_deref(), Some("Weekly"));
     assert_eq!(topics.data[0].subscription, TopicSubscription::OptOut);
     assert!(topics.data[0].explicit);
+    assert_eq!(topics.data[0].visibility, Some(TopicVisibility::Public));
     assert_eq!(topics.data[1].description, None);
+    assert_eq!(topics.data[1].visibility, Some(TopicVisibility::Private));
     assert_eq!(topics.data[1].subscription, TopicSubscription::OptIn);
     assert!(!topics.data[1].explicit);
 }
@@ -1901,4 +1905,126 @@ async fn emails_send_surfaces_all_recipients_suppressed() {
         .unwrap_err();
     assert_eq!(err.status_code(), Some(422));
     assert_eq!(err.name(), Some("all_recipients_suppressed"));
+}
+
+#[tokio::test]
+async fn contacts_batch_remove_by_ids_and_emails() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch/remove"))
+        .and(body_json(json!({ "ids": ["c1", "c2"] })))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "contact", "contact": "c1", "deleted": true }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch/remove"))
+        .and(body_json(json!({ "emails": ["a@x.dev"] })))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "contact", "contact": "c3", "deleted": true }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let by_id = ms
+        .contacts
+        .batch_remove(&BatchRemoveContactsOptions::Ids(vec![
+            "c1".into(),
+            "c2".into(),
+        ]))
+        .await
+        .unwrap();
+    assert_eq!(by_id.data.len(), 1);
+    assert_eq!(by_id.data[0].object, "contact");
+    assert_eq!(by_id.data[0].contact, "c1");
+    assert!(by_id.data[0].deleted);
+    let by_email = ms
+        .contacts
+        .batch_remove(&BatchRemoveContactsOptions::Emails(vec!["a@x.dev".into()]))
+        .await
+        .unwrap();
+    assert_eq!(by_email.data[0].contact, "c3");
+}
+
+#[tokio::test]
+async fn contacts_preferences_link_posts_no_body_by_id_and_email() {
+    let server = MockServer::start().await;
+    let link = json!({
+        "object": "preferences_link", "contact": "c1",
+        "url": "https://app.x.dev/unsubscribe/tok"
+    });
+    Mock::given(method("POST"))
+        .and(path("/contacts/c1/preferences-link"))
+        .and(body_string(""))
+        .respond_with(ok_json(link.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path_regex(r"^/contacts/c(%40|@)x\.dev/preferences-link$"))
+        .and(body_string(""))
+        .respond_with(ok_json(link))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let by_id = ms.contacts.preferences_link("c1").await.unwrap();
+    assert_eq!(by_id.object, "preferences_link");
+    assert_eq!(by_id.contact, "c1");
+    assert_eq!(by_id.url, "https://app.x.dev/unsubscribe/tok");
+    let by_email = ms
+        .contacts
+        .preferences_link(ContactAddress::email("c@x.dev"))
+        .await
+        .unwrap();
+    assert_eq!(by_email.contact, "c1");
+}
+
+#[tokio::test]
+async fn webhooks_rotate_sends_empty_object_or_options() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks/w1/rotate"))
+        .and(body_json(json!({})))
+        .respond_with(ok_json(json!({
+            "object": "webhook", "id": "w1", "signing_secret": "whsec_new",
+            "previous_secret_expires_at": "2026-01-02T00:00:00Z"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks/w1/rotate"))
+        .and(body_json(
+            json!({ "signing_secret": "whsec_mine", "overlap_hours": 0 }),
+        ))
+        .respond_with(ok_json(json!({
+            "object": "webhook", "id": "w1", "signing_secret": "whsec_mine",
+            "previous_secret_expires_at": null
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let minted = ms.webhooks.rotate("w1", None).await.unwrap();
+    assert_eq!(minted.object, "webhook");
+    assert_eq!(minted.id, "w1");
+    assert_eq!(minted.signing_secret, "whsec_new");
+    assert_eq!(
+        minted.previous_secret_expires_at.as_deref(),
+        Some("2026-01-02T00:00:00Z")
+    );
+    let own = ms
+        .webhooks
+        .rotate(
+            "w1",
+            Some(&RotateWebhookOptions {
+                signing_secret: Some("whsec_mine".into()),
+                overlap_hours: Some(0),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(own.signing_secret, "whsec_mine");
+    assert!(own.previous_secret_expires_at.is_none());
 }

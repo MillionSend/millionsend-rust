@@ -4,7 +4,8 @@ use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
     list_query, CreateWebhookOptions, CreateWebhookResponse, DeleteWebhookResponse, List,
-    ListOptions, UpdateWebhookOptions, Webhook, WebhookId,
+    ListOptions, RotateWebhookOptions, RotateWebhookResponse, UpdateWebhookOptions, Webhook,
+    WebhookId,
 };
 
 /// Webhook endpoints. Mirrors Resend's `webhooks` resource.
@@ -17,7 +18,8 @@ impl Webhooks {
         self.0.post(&["webhooks"], webhook).await
     }
 
-    /// `GET /webhooks/:id` — includes `signing_secret`.
+    /// `GET /webhooks/:id` — includes `signing_secret` and, while a rotation's
+    /// previous secret still signs, `previous_secret_expires_at`.
     pub async fn get(&self, id: &str) -> Result<Webhook> {
         self.0.get(&["webhooks", id], &[]).await
     }
@@ -35,5 +37,17 @@ impl Webhooks {
     /// `DELETE /webhooks/:id`
     pub async fn delete(&self, id: &str) -> Result<DeleteWebhookResponse> {
         self.0.delete(&["webhooks", id]).await
+    }
+
+    /// `POST /webhooks/:id/rotate` — mints (or takes) a new `signing_secret`;
+    /// the previous one keeps signing for `overlap_hours` (MillionSend
+    /// extension). `None` sends `{}`.
+    pub async fn rotate(
+        &self,
+        id: &str,
+        options: Option<&RotateWebhookOptions>,
+    ) -> Result<RotateWebhookResponse> {
+        let options = options.cloned().unwrap_or_default();
+        self.0.post(&["webhooks", id, "rotate"], &options).await
     }
 }

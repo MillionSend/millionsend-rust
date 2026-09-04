@@ -4,7 +4,8 @@ use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
     list_query, AddContactSegmentResponse, BatchContactsOptions, BatchContactsResponse,
-    BatchValidation, Contact, ContactAddress, ContactId, ContactListItem, ContactProperty,
+    BatchRemoveContactsOptions, BatchRemoveContactsResponse, BatchValidation, Contact,
+    ContactAddress, ContactId, ContactListItem, ContactPreferencesLink, ContactProperty,
     ContactPropertyId, ContactTopic, ContactTopicUpdate, CreateContactOptions,
     CreateContactPropertyOptions, DeleteContactPropertyResponse, DeleteContactResponse, List,
     ListOptions, RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
@@ -95,6 +96,30 @@ impl Contacts {
     /// `GET /contacts`
     pub async fn list(&self, options: Option<&ListOptions>) -> Result<List<ContactListItem>> {
         self.config.get(&["contacts"], &list_query(options)).await
+    }
+
+    /// `POST /contacts/batch/remove` — by ids or by emails, up to 1000
+    /// (MillionSend extension). Lists only the contacts actually deleted.
+    pub async fn batch_remove(
+        &self,
+        options: &BatchRemoveContactsOptions,
+    ) -> Result<BatchRemoveContactsResponse> {
+        self.config
+            .post(&["contacts", "batch", "remove"], options)
+            .await
+    }
+
+    /// `POST /contacts/:idOrEmail/preferences-link` — the contact's hosted
+    /// preference page (MillionSend extension). 422 when the instance cannot
+    /// build hosted links.
+    pub async fn preferences_link(
+        &self,
+        address: impl Into<ContactAddress>,
+    ) -> Result<ContactPreferencesLink> {
+        let address = address.into();
+        self.config
+            .post_empty(&["contacts", address.key(), "preferences-link"])
+            .await
     }
 }
 

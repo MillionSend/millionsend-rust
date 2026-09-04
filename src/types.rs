@@ -633,6 +633,31 @@ pub struct DeleteContactResponse {
     pub deleted: bool,
 }
 
+/// Delete by contact ids or by email addresses (up to 1000 either way);
+/// serializes as `{ "ids": [...] }` or `{ "emails": [...] }`.
+#[derive(Debug, Clone, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum BatchRemoveContactsOptions {
+    Ids(Vec<String>),
+    Emails(Vec<String>),
+}
+
+/// Only the contacts actually deleted; unknown ids or addresses are skipped.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchRemoveContactsResponse {
+    pub data: Vec<DeleteContactResponse>,
+}
+
+/// The contact's hosted preference page. The URL is a contact-scoped
+/// capability with no expiry: anyone holding it can change that contact's
+/// preferences, so hand it only to the contact.
+#[derive(Debug, Clone, Deserialize)]
+pub struct ContactPreferencesLink {
+    pub object: String,
+    pub contact: String,
+    pub url: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
 pub enum TopicSubscription {
@@ -662,6 +687,9 @@ pub struct ContactTopic {
     pub description: Option<String>,
     pub subscription: TopicSubscription,
     pub explicit: bool,
+    /// The hosted preference page lists public topics only.
+    #[serde(default)]
+    pub visibility: Option<TopicVisibility>,
 }
 
 // ---- topics --------------------------------------------------------------
@@ -1204,12 +1232,36 @@ pub struct Webhook {
     /// Present on `get` only.
     #[serde(default)]
     pub signing_secret: Option<String>,
+    /// Present on `get` only; set while a rotation's previous secret still
+    /// signs deliveries alongside the current one.
+    #[serde(default)]
+    pub previous_secret_expires_at: Option<String>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
 pub struct WebhookId {
     pub object: String,
     pub id: String,
+}
+
+/// Both fields optional: omit `signing_secret` to have one minted;
+/// `overlap_hours` (0–72, server default 24) is how long the previous secret
+/// keeps signing alongside the new one. Serializes as `{}` when both are unset.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct RotateWebhookOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub signing_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub overlap_hours: Option<u32>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct RotateWebhookResponse {
+    pub object: String,
+    pub id: String,
+    pub signing_secret: String,
+    /// `None` when the previous secret was dropped at once (`overlap_hours: 0`).
+    pub previous_secret_expires_at: Option<String>,
 }
 
 pub type DeleteWebhookResponse = Deleted;
