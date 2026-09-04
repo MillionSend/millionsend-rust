@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
-    AddSuppressionOptions, BatchAddSuppressionsOptions, BatchAddSuppressionsResponse,
-    BatchRemoveSuppressionsOptions, BatchRemoveSuppressionsResponse, DeleteSuppressionResponse,
+    AddSuppressionOptions, BatchAddSuppressionOptions, BatchAddSuppressionResponse,
+    BatchRemoveSuppressionOptions, BatchRemoveSuppressionsResponse, DeleteSuppressionResponse,
     List, ListSuppressionsOptions, Suppression, SuppressionId,
 };
 
@@ -43,8 +43,8 @@ impl Suppressions {
     /// `POST /suppressions/batch/add` — up to 1000 addresses.
     pub async fn batch_add(
         &self,
-        options: &BatchAddSuppressionsOptions,
-    ) -> Result<BatchAddSuppressionsResponse> {
+        options: &BatchAddSuppressionOptions,
+    ) -> Result<BatchAddSuppressionResponse> {
         self.0
             .post(&["suppressions", "batch", "add"], options)
             .await
@@ -53,7 +53,7 @@ impl Suppressions {
     /// `POST /suppressions/batch/remove` — by emails or by ids, up to 1000.
     pub async fn batch_remove(
         &self,
-        options: &BatchRemoveSuppressionsOptions,
+        options: &BatchRemoveSuppressionOptions,
     ) -> Result<BatchRemoveSuppressionsResponse> {
         self.0
             .post(&["suppressions", "batch", "remove"], options)

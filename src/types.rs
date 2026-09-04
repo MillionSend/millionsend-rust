@@ -208,7 +208,8 @@ pub struct SendEmailOptions {
     /// Extra message headers; transport headers are rejected by the API.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub headers: Option<HashMap<String, String>>,
-    /// Passed through untouched; the API currently answers 422 for any value.
+    /// Passed through untouched so the API, not the SDK, decides whether
+    /// templates are supported (it answers 422 while they are not).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub template: Option<serde_json::Value>,
 }
@@ -707,8 +708,8 @@ pub struct TopicId {
     pub id: String,
 }
 
-/// `GET /topics` is a bare `{ data }` — topics are unpaginated (no
-/// `object`/`has_more`).
+/// `GET /topics` returns every topic at once (`has_more` is always false), so
+/// there are no cursors to expose.
 #[derive(Debug, Clone, Deserialize)]
 pub struct TopicList {
     pub data: Vec<Topic>,
@@ -862,18 +863,23 @@ pub struct SegmentFilter {
     pub conditions: Vec<SegmentCondition>,
 }
 
+/// `filter: None` creates a manual-membership segment, fed only by
+/// `contacts.segments.add` and `contacts.create`'s `segments`.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateSegmentOptions {
     pub name: String,
-    pub filter: SegmentFilter,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub filter: Option<SegmentFilter>,
 }
 
+/// `filter`: `Some(Some(f))` replaces the filter, `Some(None)` clears it (sends
+/// `null`, turning the segment manual-membership-only), `None` leaves it.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateSegmentOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
-    pub filter: Option<SegmentFilter>,
+    pub filter: Option<Option<SegmentFilter>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -980,14 +986,14 @@ pub type DeleteSuppressionResponse = Deleted;
 
 /// Up to 1000 addresses; duplicates collapse.
 #[derive(Debug, Clone, Serialize)]
-pub struct BatchAddSuppressionsOptions {
+pub struct BatchAddSuppressionOptions {
     pub emails: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub origin: Option<SuppressionOrigin>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
-pub struct BatchAddSuppressionsResponse {
+pub struct BatchAddSuppressionResponse {
     pub data: Vec<SuppressionId>,
 }
 
@@ -995,7 +1001,7 @@ pub struct BatchAddSuppressionsResponse {
 /// serializes as `{ "emails": [...] }` or `{ "ids": [...] }`.
 #[derive(Debug, Clone, Serialize)]
 #[serde(rename_all = "snake_case")]
-pub enum BatchRemoveSuppressionsOptions {
+pub enum BatchRemoveSuppressionOptions {
     Emails(Vec<String>),
     Ids(Vec<String>),
 }
@@ -1036,8 +1042,8 @@ impl CreateDomainOptions {
 }
 
 /// `tracking_subdomain`: `Some(Some(label))` sets, `Some(None)` clears (sends
-/// `null`), `None` leaves it. `tls`/`capabilities` are passed through; the API
-/// currently answers 422 for any value.
+/// `null`), `None` leaves it. `tls`/`capabilities` are passed through so the
+/// API, not the SDK, decides whether they are supported (422 while not).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateDomainOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1197,8 +1203,8 @@ pub type DeleteWebhookResponse = Deleted;
 
 // ---- templates -----------------------------------------------------------
 
-/// `from`, `reply_to` and `variables` are passed through; the API currently
-/// answers 422 when they are set.
+/// `from`, `reply_to` and `variables` are passed through so the API, not the
+/// SDK, decides whether they are supported (422 while not).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateTemplateOptions {
     pub name: String,

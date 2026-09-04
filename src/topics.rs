@@ -21,7 +21,7 @@ impl Topics {
         self.0.get(&["topics", id], &[]).await
     }
 
-    /// `GET /topics` — a bare `{ data }` list (topics are unpaginated).
+    /// `GET /topics` — every topic in one page.
     pub async fn list(&self) -> Result<TopicList> {
         self.0.get(&["topics"], &[]).await
     }

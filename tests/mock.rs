@@ -657,14 +657,14 @@ async fn segments_cover_create_get_list_update_delete() {
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let create = CreateSegmentOptions {
         name: "Active".into(),
-        filter: SegmentFilter {
+        filter: Some(SegmentFilter {
             match_: SegmentMatch::All,
             conditions: vec![SegmentCondition {
                 field: "email".into(),
                 op: "is_set".into(),
                 value: None,
             }],
-        },
+        }),
     };
     assert_eq!(ms.segments.create(&create).await.unwrap().id, "s1");
     assert_eq!(ms.segments.get("s1").await.unwrap().contact_count, Some(42));
@@ -1279,6 +1279,45 @@ async fn topics_update_and_visibility() {
 }
 
 #[tokio::test]
+async fn segments_manual_create_omits_filter_and_update_null_clears_it() {
+    let server = MockServer::start().await;
+    let manual = json!({
+        "object": "segment", "id": "s1", "name": "VIPs", "filter": null,
+        "created_at": "2026-01-01T00:00:00Z"
+    });
+    Mock::given(method("POST"))
+        .and(path("/segments"))
+        .and(body_json(json!({ "name": "VIPs" })))
+        .respond_with(ok_json(manual.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/segments/s1"))
+        .and(body_json(json!({ "filter": null })))
+        .respond_with(ok_json(manual))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let create = CreateSegmentOptions {
+        name: "VIPs".into(),
+        filter: None,
+    };
+    assert!(ms.segments.create(&create).await.unwrap().filter.is_none());
+    let clear = UpdateSegmentOptions {
+        filter: Some(None),
+        ..Default::default()
+    };
+    assert!(ms
+        .segments
+        .update("s1", &clear)
+        .await
+        .unwrap()
+        .filter
+        .is_none());
+}
+
+#[tokio::test]
 async fn segments_manual_segment_parses_null_filter_and_lists_contacts() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -1398,7 +1437,7 @@ async fn suppressions_cover_add_get_list_remove_and_batches() {
     assert!(ms.suppressions.remove("sp1").await.unwrap().deleted);
     let added = ms
         .suppressions
-        .batch_add(&BatchAddSuppressionsOptions {
+        .batch_add(&BatchAddSuppressionOptions {
             emails: vec!["a@x.dev".into(), "b@x.dev".into()],
             origin: Some(SuppressionOrigin::Manual),
         })
@@ -1407,7 +1446,7 @@ async fn suppressions_cover_add_get_list_remove_and_batches() {
     assert_eq!(added.data.len(), 2);
     let by_email = ms
         .suppressions
-        .batch_remove(&BatchRemoveSuppressionsOptions::Emails(vec![
+        .batch_remove(&BatchRemoveSuppressionOptions::Emails(vec![
             "a@x.dev".into()
         ]))
         .await
@@ -1415,7 +1454,7 @@ async fn suppressions_cover_add_get_list_remove_and_batches() {
     assert_eq!(by_email.data[0].id, "sp3");
     let by_id = ms
         .suppressions
-        .batch_remove(&BatchRemoveSuppressionsOptions::Ids(vec!["sp4".into()]))
+        .batch_remove(&BatchRemoveSuppressionOptions::Ids(vec!["sp4".into()]))
         .await
         .unwrap();
     assert!(by_id.data[0].deleted);

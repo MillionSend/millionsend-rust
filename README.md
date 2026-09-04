@@ -302,24 +302,33 @@ filter, a manual list fed by `contacts.segments.add`. `Segment.filter` is
 `None` for manual segments.
 
 ```rust
-use millionsend::{CreateSegmentOptions, SegmentCondition, SegmentFilter, SegmentMatch};
+use millionsend::{
+    CreateSegmentOptions, SegmentCondition, SegmentFilter, SegmentMatch, UpdateSegmentOptions,
+};
 
 let segment = ms.segments.create(&CreateSegmentOptions {
     name: "Pro plan".into(),
-    filter: SegmentFilter {
+    filter: Some(SegmentFilter {
         match_: SegmentMatch::All,
         conditions: vec![SegmentCondition {
             field: "property:plan".into(),
             op: "equals".into(),
             value: Some("pro".into()),
         }],
-    },
+    }),
+}).await?;
+let vips = ms.segments.create(&CreateSegmentOptions {
+    name: "VIPs".into(),
+    filter: None,                            // manual segment: members come from contacts.segments.add
 }).await?;
 
 ms.segments.get(&id).await?;                 // includes a live contact_count
 ms.segments.list(None).await?;
 ms.segments.list_contacts(&id, None).await?; // GET /segments/:id/contacts
-ms.segments.update(&id, &Default::default()).await?;
+ms.segments.update(&id, &UpdateSegmentOptions {
+    filter: Some(None),                      // null drops the filter, keeping the members added by hand
+    ..Default::default()
+}).await?;
 ms.segments.delete(&id).await?;
 ```
 
@@ -329,7 +338,7 @@ Addresses the team never sends to. Entries are addressable by id or email.
 
 ```rust
 use millionsend::{
-    AddSuppressionOptions, BatchAddSuppressionsOptions, BatchRemoveSuppressionsOptions,
+    AddSuppressionOptions, BatchAddSuppressionOptions, BatchRemoveSuppressionOptions,
     ListSuppressionsOptions, SuppressionOrigin,
 };
 
@@ -341,12 +350,12 @@ ms.suppressions.list(Some(&ListSuppressionsOptions {
 })).await?;
 ms.suppressions.remove("bounced@example.com").await?;                             // DELETE /suppressions/:idOrEmail
 
-ms.suppressions.batch_add(&BatchAddSuppressionsOptions {
+ms.suppressions.batch_add(&BatchAddSuppressionOptions {
     emails: vec!["a@example.com".into(), "b@example.com".into()],                 // up to 1000
     origin: Some(SuppressionOrigin::Manual),
 }).await?;
-ms.suppressions.batch_remove(&BatchRemoveSuppressionsOptions::Emails(vec!["a@example.com".into()])).await?;
-ms.suppressions.batch_remove(&BatchRemoveSuppressionsOptions::Ids(vec![id])).await?;
+ms.suppressions.batch_remove(&BatchRemoveSuppressionOptions::Emails(vec!["a@example.com".into()])).await?;
+ms.suppressions.batch_remove(&BatchRemoveSuppressionOptions::Ids(vec![id])).await?;
 ```
 
 ### Domains
@@ -470,9 +479,14 @@ if let Some(cap) = usage.limits.emails_per_day {
 + let ms = MillionSend::with_base_url("ms_123", "https://mail.acme.dev");
 ```
 
-Method names and nesting match: `emails`, `batch`, `contacts` (with `topics`,
-`segments`, `properties`), `topics`, `broadcasts`, `segments`, `suppressions`,
-`domains`, `webhooks`, `api_keys`, `templates`. Notes:
+Resource and method names match: `emails`, `batch`, `contacts`, `topics`,
+`broadcasts`, `segments`, `suppressions`, `domains`, `webhooks`, `api_keys`,
+`templates`. Notes:
+
+- **Contacts nest** their sub-resources — `contacts.topics.update`,
+  `contacts.segments.add`/`remove`, `contacts.properties.*` — where `resend-rs`
+  keeps them flat (`update_contact_topics`, `add_contact_segment`,
+  `create_property`, …).
 
 - **No audiences.** Contacts are team-global; the API's `/audiences/*` routes
   are a compatibility shim and are not part of this SDK. Use `segments` (saved
