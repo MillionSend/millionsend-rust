@@ -580,6 +580,21 @@ impl From<&String> for ContactAddress {
     }
 }
 
+/// In a request body an address is `{ "email": … }` or `{ "id": … }` — one key,
+/// chosen like [`ContactAddress::key`] (email wins), since the API rejects both.
+impl Serialize for ContactAddress {
+    fn serialize<S: serde::Serializer>(&self, serializer: S) -> Result<S::Ok, S::Error> {
+        use serde::ser::SerializeMap as _;
+        let mut map = serializer.serialize_map(Some(1))?;
+        match (&self.email, &self.id) {
+            (Some(email), _) => map.serialize_entry("email", email)?,
+            (None, Some(id)) => map.serialize_entry("id", id)?,
+            (None, None) => {}
+        }
+        map.end()
+    }
+}
+
 /// Fields default to "leave unchanged". For `first_name`/`last_name`,
 /// `Some(Some(v))` sets, `Some(None)` clears the field (sends `null`), and
 /// `None` omits it.
@@ -616,6 +631,50 @@ pub struct Contact {
     pub properties: HashMap<String, serde_json::Value>,
 }
 
+/// Facets a contact read can attach (`?include=` on lists, `include` on
+/// `batch_get`).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ContactInclude {
+    Properties,
+    Topics,
+}
+
+impl ContactInclude {
+    pub(crate) fn as_str(self) -> &'static str {
+        match self {
+            ContactInclude::Properties => "properties",
+            ContactInclude::Topics => "topics",
+        }
+    }
+}
+
+/// [`ListOptions`] plus `include`, which attaches `properties` and/or `topics`
+/// to every item (`?include=properties,topics`).
+#[derive(Debug, Clone, Default)]
+pub struct ListContactsOptions {
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub include: Option<Vec<ContactInclude>>,
+}
+
+impl ListContactsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        if let Some(include) = &self.include {
+            let names: Vec<_> = include.iter().map(|i| i.as_str()).collect();
+            query.push(("include", names.join(",")));
+        }
+        query
+    }
+}
+
 #[derive(Debug, Clone, Deserialize)]
 pub struct ContactListItem {
     pub id: String,
@@ -624,6 +683,13 @@ pub struct ContactListItem {
     pub last_name: Option<String>,
     pub created_at: String,
     pub unsubscribed: bool,
+    /// Only with `include: [Properties]`; the same typed wrappers as
+    /// [`Contact::properties`].
+    #[serde(default)]
+    pub properties: Option<HashMap<String, serde_json::Value>>,
+    /// Only with `include: [Topics]`; the same rows as `contacts.topics.list`.
+    #[serde(default)]
+    pub topics: Option<Vec<ContactTopic>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -646,6 +712,52 @@ pub enum BatchRemoveContactsOptions {
 #[derive(Debug, Clone, Deserialize)]
 pub struct BatchRemoveContactsResponse {
     pub data: Vec<DeleteContactResponse>,
+}
+
+/// `include` for `POST /contacts/batch/get`: facets attached to every contact
+/// returned.
+#[derive(Debug, Clone, Default)]
+pub struct BatchGetContactsOptions {
+    pub include: Option<Vec<ContactInclude>>,
+}
+
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchGetContactsResponse {
+    pub object: String,
+    /// The contacts found, in request order.
+    pub data: Vec<BatchGetContact>,
+    /// Request entries that matched no contact, by position in the request.
+    pub missing: Vec<MissingContact>,
+}
+
+/// One contact as `batch_get` returns it: a [`ContactListItem`] plus `object`.
+#[derive(Debug, Clone, Deserialize)]
+pub struct BatchGetContact {
+    pub object: String,
+    pub id: String,
+    pub email: String,
+    pub first_name: Option<String>,
+    pub last_name: Option<String>,
+    pub created_at: String,
+    pub unsubscribed: bool,
+    /// Only with `include: [Properties]`; the same typed wrappers as
+    /// [`Contact::properties`].
+    #[serde(default)]
+    pub properties: Option<HashMap<String, serde_json::Value>>,
+    /// Only with `include: [Topics]`; the same rows as `contacts.topics.list`.
+    #[serde(default)]
+    pub topics: Option<Vec<ContactTopic>>,
+}
+
+/// A `batch_get` request entry that matched no contact, carrying whichever of
+/// `id`/`email` the entry had.
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct MissingContact {
+    pub index: u32,
+    #[serde(default)]
+    pub id: Option<String>,
+    #[serde(default)]
+    pub email: Option<String>,
 }
 
 /// The contact's hosted preference page. The URL is a contact-scoped

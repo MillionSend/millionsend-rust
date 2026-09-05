@@ -436,11 +436,52 @@ async fn contacts_delete_and_list() {
             .unwrap()
             .deleted
     );
-    let options = ListOptions {
+    let options = ListContactsOptions {
         after: Some("cur".into()),
         ..Default::default()
     };
     ms.contacts.list(Some(&options)).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[1].url.query(), Some("after=cur"));
+}
+
+#[tokio::test]
+async fn contacts_list_passes_include_and_parses_properties_and_topics() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/contacts"))
+        .and(query_param("limit", "2"))
+        .and(query_param("include", "properties,topics"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{
+                "id": "c1", "email": "c@x.dev", "first_name": null, "last_name": null,
+                "created_at": "2026-01-01T00:00:00Z", "unsubscribed": false,
+                "properties": { "plan": { "type": "string", "value": "pro" } },
+                "topics": [{ "id": "t1", "name": "Insights", "description": null,
+                             "subscription": "opt_in", "explicit": false, "visibility": "public" }]
+            }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let options = ListContactsOptions {
+        limit: Some(2),
+        include: Some(vec![ContactInclude::Properties, ContactInclude::Topics]),
+        ..Default::default()
+    };
+    let list = ms.contacts.list(Some(&options)).await.unwrap();
+    let item = &list.data[0];
+    assert_eq!(
+        item.properties.as_ref().unwrap()["plan"],
+        json!({ "type": "string", "value": "pro" })
+    );
+    let topics = item.topics.as_ref().unwrap();
+    assert_eq!(topics[0].id, "t1");
+    assert_eq!(topics[0].subscription, TopicSubscription::OptIn);
+    assert!(!topics[0].explicit);
+    assert_eq!(topics[0].visibility, Some(TopicVisibility::Public));
 }
 
 #[tokio::test]
@@ -1331,10 +1372,12 @@ async fn segments_manual_segment_parses_null_filter_and_lists_contacts() {
     Mock::given(method("GET"))
         .and(path("/segments/s1/contacts"))
         .and(query_param("after", "cur"))
+        .and(query_param("include", "topics"))
         .respond_with(ok_json(json!({
             "object": "list", "has_more": false,
             "data": [{ "id": "c1", "email": "c@x.dev", "first_name": null, "last_name": null,
-                       "created_at": "2026-01-01T00:00:00Z", "unsubscribed": false }]
+                       "created_at": "2026-01-01T00:00:00Z", "unsubscribed": false,
+                       "topics": [] }]
         })))
         .mount(&server)
         .await;
@@ -1342,8 +1385,9 @@ async fn segments_manual_segment_parses_null_filter_and_lists_contacts() {
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let segment = ms.segments.get("s1").await.unwrap();
     assert!(segment.filter.is_none());
-    let options = ListOptions {
+    let options = ListContactsOptions {
         after: Some("cur".into()),
+        include: Some(vec![ContactInclude::Topics]),
         ..Default::default()
     };
     let members = ms
@@ -1352,6 +1396,8 @@ async fn segments_manual_segment_parses_null_filter_and_lists_contacts() {
         .await
         .unwrap();
     assert_eq!(members.data[0].email, "c@x.dev");
+    assert!(members.data[0].properties.is_none());
+    assert!(members.data[0].topics.as_ref().unwrap().is_empty());
 }
 
 // ---- suppressions --------------------------------------------------------
@@ -1946,6 +1992,84 @@ async fn contacts_batch_remove_by_ids_and_emails() {
         .await
         .unwrap();
     assert_eq!(by_email.data[0].contact, "c3");
+}
+
+#[tokio::test]
+async fn contacts_batch_get_posts_ids_and_emails_and_parses_missing() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch/get"))
+        .and(body_json(json!({
+            "contacts": [{ "id": "c1" }, { "email": "a@x.dev" }, { "id": "c9" }],
+            "include": ["topics"]
+        })))
+        .respond_with(ok_json(json!({
+            "object": "list",
+            "data": [
+                { "object": "contact", "id": "c1", "email": "c@x.dev", "first_name": "Ada",
+                  "last_name": null, "created_at": "2026-01-01T00:00:00Z", "unsubscribed": false,
+                  "topics": [{ "id": "t1", "name": "Insights", "description": null,
+                               "subscription": "opt_out", "explicit": true, "visibility": "private" }] },
+                { "object": "contact", "id": "c2", "email": "a@x.dev", "first_name": null,
+                  "last_name": null, "created_at": "2026-01-01T00:00:00Z", "unsubscribed": true,
+                  "topics": [] }
+            ],
+            "missing": [{ "index": 2, "id": "c9" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch/get"))
+        .and(body_json(json!({ "contacts": [{ "email": "b@x.dev" }] })))
+        .respond_with(ok_json(json!({
+            "object": "list", "data": [], "missing": [{ "index": 0, "email": "b@x.dev" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    // An address with both keys goes out as its email, like the path key.
+    let both = ContactAddress {
+        id: Some("c2".into()),
+        email: Some("a@x.dev".into()),
+    };
+    let res = ms
+        .contacts
+        .batch_get(
+            &["c1".into(), both, ContactAddress::id("c9")],
+            Some(&BatchGetContactsOptions {
+                include: Some(vec![ContactInclude::Topics]),
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(res.object, "list");
+    assert_eq!(res.data.len(), 2);
+    assert_eq!(res.data[0].object, "contact");
+    assert_eq!(res.data[0].email, "c@x.dev");
+    assert_eq!(res.data[0].first_name.as_deref(), Some("Ada"));
+    assert!(res.data[0].properties.is_none());
+    let topics = res.data[0].topics.as_ref().unwrap();
+    assert_eq!(topics[0].subscription, TopicSubscription::OptOut);
+    assert!(res.data[1].unsubscribed);
+    assert_eq!(
+        res.missing,
+        vec![MissingContact {
+            index: 2,
+            id: Some("c9".into()),
+            email: None
+        }]
+    );
+
+    let none = ms
+        .contacts
+        .batch_get(&[ContactAddress::email("b@x.dev")], None)
+        .await
+        .unwrap();
+    assert!(none.data.is_empty());
+    assert_eq!(none.missing[0].index, 0);
+    assert_eq!(none.missing[0].email.as_deref(), Some("b@x.dev"));
+    assert_eq!(none.missing[0].id, None);
 }
 
 #[tokio::test]

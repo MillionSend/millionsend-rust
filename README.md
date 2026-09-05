@@ -169,8 +169,8 @@ creating a duplicate is a 409 `validation_error`.
 
 ```rust
 use millionsend::{
-    ContactAddress, ContactTopicUpdate, CreateContactOptions, ListOptions, SegmentRef,
-    TopicSubscription, UpdateContactOptions,
+    ContactAddress, ContactInclude, ContactTopicUpdate, CreateContactOptions,
+    ListContactsOptions, SegmentRef, TopicSubscription, UpdateContactOptions,
 };
 
 ms.contacts.create(&CreateContactOptions {
@@ -197,13 +197,23 @@ ms.contacts.update("contact-id", &UpdateContactOptions {
 }).await?;
 
 ms.contacts.delete(ContactAddress::email("ada@acme.dev")).await?;
-ms.contacts.list(Some(&ListOptions { limit: Some(20), ..Default::default() })).await?;
+ms.contacts.list(Some(&ListContactsOptions { limit: Some(20), ..Default::default() })).await?;
+// Bulk read (MillionSend extension): attach properties and topic subscriptions to every item,
+// so an audience reads in one request per 100 contacts instead of one per contact.
+ms.contacts.list(Some(&ListContactsOptions {
+    limit: Some(100),
+    include: Some(vec![ContactInclude::Properties, ContactInclude::Topics]), // ?include=properties,topics
+    ..Default::default()
+})).await?;
 ```
 
 `Contact.properties` values arrive as typed wrappers on the wire
 (`{ "type": "string", "value": "pro" }` / `{ "type": "number", "value": 3 }`).
+With `include`, each `ContactListItem` carries the same `properties` map and
+the same `topics` rows as `contacts.get` / `contacts.topics.list`; without it
+both are `None`. `segments.list_contacts` takes the same options.
 
-#### Batch create and remove (MillionSend extensions)
+#### Batch create, get and remove (MillionSend extensions)
 
 ```rust
 use millionsend::{BatchContactsOptions, BatchRemoveContactsOptions, BatchValidation, OnConflict};
@@ -226,6 +236,21 @@ ms.contacts.batch_remove(&BatchRemoveContactsOptions::Emails(vec!["a@acme.dev".i
 
 Exactly one of ids or emails, up to 1000; `data` lists only the contacts
 actually deleted (`{ object, contact, deleted }`), unknown ones are skipped.
+
+```rust
+use millionsend::{BatchGetContactsOptions, ContactAddress, ContactInclude};
+
+let res = ms.contacts.batch_get(
+    &["contact-id".into(), ContactAddress::email("ada@acme.dev")],
+    Some(&BatchGetContactsOptions { include: Some(vec![ContactInclude::Topics]) }),
+).await?;                                                  // POST /contacts/batch/get
+res.data;    // the contacts found, in request order, each with `topics` attached
+res.missing; // [{ index, id?, email? }] — request entries that matched nobody
+```
+
+Up to 1000 addresses per call, ids and emails mixed (emails match
+case-insensitively), and one request against the rate limit; unknown entries
+land in `missing` instead of failing the call.
 
 #### Topic subscriptions, segment membership and the preference page
 
@@ -352,7 +377,7 @@ let vips = ms.segments.create(&CreateSegmentOptions {
 
 ms.segments.get(&id).await?;                 // includes a live contact_count
 ms.segments.list(None).await?;
-ms.segments.list_contacts(&id, None).await?; // GET /segments/:id/contacts
+ms.segments.list_contacts(&id, None).await?; // GET /segments/:id/contacts — takes ListContactsOptions (include works here too)
 ms.segments.update(&id, &UpdateSegmentOptions {
     filter: Some(None),                      // null drops the filter, keeping the members added by hand
     ..Default::default()
@@ -535,7 +560,8 @@ Resource and method names match: `emails`, `batch`, `contacts`, `topics`,
   filters or manual lists) to target a subset, or a broadcast with no
   `segment_id`/`topic_id` to reach everyone.
 - **MillionSend extensions** with no Resend counterpart: `segments`,
-  `contacts.create_batch`, `contacts.batch_remove`, `contacts.preferences_link`,
+  `contacts.create_batch`, `contacts.batch_get`, `contacts.batch_remove`,
+  `contacts.preferences_link`,
   `webhooks.rotate`, `deliverability`, `usage`, `emails.get_insights`.
 - **Templates** are always published; `publish` is a no-op kept for
   compatibility, and `from`/`reply_to`/`variables` are rejected with 422.

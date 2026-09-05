@@ -3,8 +3,8 @@ use std::sync::Arc;
 use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
-    list_query, ContactListItem, CreateSegmentOptions, DeleteSegmentResponse, List, ListOptions,
-    Segment, UpdateSegmentOptions,
+    list_query, ContactListItem, CreateSegmentOptions, DeleteSegmentResponse, List,
+    ListContactsOptions, ListOptions, Segment, UpdateSegmentOptions,
 };
 
 /// Dynamic segments — a saved filter over the team's contacts (MillionSend
@@ -28,15 +28,17 @@ impl Segments {
         self.0.get(&["segments"], &list_query(options)).await
     }
 
-    /// `GET /segments/:id/contacts` — the segment's current members.
+    /// `GET /segments/:id/contacts` — the segment's current members; `include`
+    /// attaches `properties` and/or `topics` to every item.
     pub async fn list_contacts(
         &self,
         id: &str,
-        options: Option<&ListOptions>,
+        options: Option<&ListContactsOptions>,
     ) -> Result<List<ContactListItem>> {
-        self.0
-            .get(&["segments", id, "contacts"], &list_query(options))
-            .await
+        let query = options
+            .map(ListContactsOptions::to_query)
+            .unwrap_or_default();
+        self.0.get(&["segments", id, "contacts"], &query).await
     }
 
     /// `PATCH /segments/:id`

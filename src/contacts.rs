@@ -1,14 +1,17 @@
 use std::sync::Arc;
 
+use serde::Serialize;
+
 use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
     list_query, AddContactSegmentResponse, BatchContactsOptions, BatchContactsResponse,
-    BatchRemoveContactsOptions, BatchRemoveContactsResponse, BatchValidation, Contact,
-    ContactAddress, ContactId, ContactListItem, ContactPreferencesLink, ContactProperty,
-    ContactPropertyId, ContactTopic, ContactTopicUpdate, CreateContactOptions,
-    CreateContactPropertyOptions, DeleteContactPropertyResponse, DeleteContactResponse, List,
-    ListOptions, RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
+    BatchGetContactsOptions, BatchGetContactsResponse, BatchRemoveContactsOptions,
+    BatchRemoveContactsResponse, BatchValidation, Contact, ContactAddress, ContactId,
+    ContactInclude, ContactListItem, ContactPreferencesLink, ContactProperty, ContactPropertyId,
+    ContactTopic, ContactTopicUpdate, CreateContactOptions, CreateContactPropertyOptions,
+    DeleteContactPropertyResponse, DeleteContactResponse, List, ListContactsOptions, ListOptions,
+    RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
     UpdateContactTopicsResponse,
 };
 
@@ -93,9 +96,31 @@ impl Contacts {
         self.config.delete(&["contacts", address.key()]).await
     }
 
-    /// `GET /contacts`
-    pub async fn list(&self, options: Option<&ListOptions>) -> Result<List<ContactListItem>> {
-        self.config.get(&["contacts"], &list_query(options)).await
+    /// `GET /contacts` — `include` attaches `properties` and/or `topics` to
+    /// every item (MillionSend extension).
+    pub async fn list(
+        &self,
+        options: Option<&ListContactsOptions>,
+    ) -> Result<List<ContactListItem>> {
+        let query = options
+            .map(ListContactsOptions::to_query)
+            .unwrap_or_default();
+        self.config.get(&["contacts"], &query).await
+    }
+
+    /// `POST /contacts/batch/get` — up to 1000 contacts by id or email in one
+    /// request, returned in request order (MillionSend extension). Entries
+    /// that match no contact land in `missing` instead of failing the call.
+    pub async fn batch_get(
+        &self,
+        contacts: &[ContactAddress],
+        options: Option<&BatchGetContactsOptions>,
+    ) -> Result<BatchGetContactsResponse> {
+        let body = BatchGetContactsBody {
+            contacts,
+            include: options.and_then(|o| o.include.as_deref()),
+        };
+        self.config.post(&["contacts", "batch", "get"], &body).await
     }
 
     /// `POST /contacts/batch/remove` — by ids or by emails, up to 1000
@@ -217,4 +242,11 @@ impl ContactProperties {
     pub async fn delete(&self, id: &str) -> Result<DeleteContactPropertyResponse> {
         self.0.delete(&["contact-properties", id]).await
     }
+}
+
+#[derive(Serialize)]
+struct BatchGetContactsBody<'a> {
+    contacts: &'a [ContactAddress],
+    #[serde(skip_serializing_if = "Option::is_none")]
+    include: Option<&'a [ContactInclude]>,
 }
