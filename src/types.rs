@@ -699,6 +699,15 @@ pub struct DeleteContactResponse {
     pub deleted: bool,
 }
 
+/// `erase` for `contacts.delete` and `contacts.batch_remove`. A plain delete
+/// keeps the contact's emails in the send log; `erase: true` also scrubs the
+/// address from email history, event payloads and API logs (a GDPR/LGPD
+/// erasure).
+#[derive(Debug, Clone, Default)]
+pub struct DeleteContactOptions {
+    pub erase: bool,
+}
+
 /// Delete by contact ids or by email addresses (up to 1000 either way);
 /// serializes as `{ "ids": [...] }` or `{ "emails": [...] }`.
 #[derive(Debug, Clone, Serialize)]

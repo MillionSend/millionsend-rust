@@ -413,6 +413,14 @@ async fn contacts_update_sends_only_provided_keys_null_clears() {
 async fn contacts_delete_and_list() {
     let server = MockServer::start().await;
     Mock::given(method("DELETE"))
+        .and(path("/contacts/c2"))
+        .and(query_param("erase", "true"))
+        .respond_with(ok_json(json!({
+            "object": "contact", "contact": "c2", "deleted": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
         .and(path_regex(r"^/contacts/c(%40|@)x\.dev$"))
         .respond_with(ok_json(json!({
             "object": "contact", "contact": "c1", "deleted": true
@@ -431,18 +439,26 @@ async fn contacts_delete_and_list() {
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     assert!(
         ms.contacts
-            .delete(ContactAddress::email("c@x.dev"))
+            .delete(ContactAddress::email("c@x.dev"), None)
             .await
             .unwrap()
             .deleted
     );
+    let erased = ms
+        .contacts
+        .delete("c2", Some(&DeleteContactOptions { erase: true }))
+        .await
+        .unwrap();
+    assert_eq!(erased.contact, "c2");
     let options = ListContactsOptions {
         after: Some("cur".into()),
         ..Default::default()
     };
     ms.contacts.list(Some(&options)).await.unwrap();
     let requests = server.received_requests().await.unwrap();
-    assert_eq!(requests[1].url.query(), Some("after=cur"));
+    assert_eq!(requests[0].url.query(), None);
+    assert_eq!(requests[1].url.query(), Some("erase=true"));
+    assert_eq!(requests[2].url.query(), Some("after=cur"));
 }
 
 #[tokio::test]
@@ -1972,26 +1988,47 @@ async fn contacts_batch_remove_by_ids_and_emails() {
         })))
         .mount(&server)
         .await;
+    Mock::given(method("POST"))
+        .and(path("/contacts/batch/remove"))
+        .and(body_json(json!({ "emails": ["b@x.dev"], "erase": true })))
+        .respond_with(ok_json(json!({
+            "data": [{ "object": "contact", "contact": "c4", "deleted": true }]
+        })))
+        .mount(&server)
+        .await;
 
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let by_id = ms
         .contacts
-        .batch_remove(&BatchRemoveContactsOptions::Ids(vec![
-            "c1".into(),
-            "c2".into(),
-        ]))
+        .batch_remove(
+            &BatchRemoveContactsOptions::Ids(vec!["c1".into(), "c2".into()]),
+            None,
+        )
         .await
         .unwrap();
     assert_eq!(by_id.data.len(), 1);
     assert_eq!(by_id.data[0].object, "contact");
     assert_eq!(by_id.data[0].contact, "c1");
     assert!(by_id.data[0].deleted);
+    // `erase: false` is omitted from the body, like `None` (the matcher is exact).
     let by_email = ms
         .contacts
-        .batch_remove(&BatchRemoveContactsOptions::Emails(vec!["a@x.dev".into()]))
+        .batch_remove(
+            &BatchRemoveContactsOptions::Emails(vec!["a@x.dev".into()]),
+            Some(&DeleteContactOptions { erase: false }),
+        )
         .await
         .unwrap();
     assert_eq!(by_email.data[0].contact, "c3");
+    let erased = ms
+        .contacts
+        .batch_remove(
+            &BatchRemoveContactsOptions::Emails(vec!["b@x.dev".into()]),
+            Some(&DeleteContactOptions { erase: true }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(erased.data[0].contact, "c4");
 }
 
 #[tokio::test]

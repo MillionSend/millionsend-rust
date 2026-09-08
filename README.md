@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.6"
+millionsend = "0.8"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -170,7 +170,8 @@ creating a duplicate is a 409 `validation_error`.
 ```rust
 use millionsend::{
     ContactAddress, ContactInclude, ContactTopicUpdate, CreateContactOptions,
-    ListContactsOptions, SegmentRef, TopicSubscription, UpdateContactOptions,
+    DeleteContactOptions, ListContactsOptions, SegmentRef, TopicSubscription,
+    UpdateContactOptions,
 };
 
 ms.contacts.create(&CreateContactOptions {
@@ -196,7 +197,8 @@ ms.contacts.update("contact-id", &UpdateContactOptions {
     ..Default::default()
 }).await?;
 
-ms.contacts.delete(ContactAddress::email("ada@acme.dev")).await?;
+ms.contacts.delete(ContactAddress::email("ada@acme.dev"), None).await?; // the contact's emails stay in the send log
+ms.contacts.delete("contact-id", Some(&DeleteContactOptions { erase: true })).await?; // ?erase=true — also scrubs the address from email history, event payloads and API logs (GDPR/LGPD)
 ms.contacts.list(Some(&ListContactsOptions { limit: Some(20), ..Default::default() })).await?;
 // Bulk read (MillionSend extension): attach properties and topic subscriptions to every item,
 // so an audience reads in one request per 100 contacts instead of one per contact.
@@ -216,7 +218,7 @@ both are `None`. `segments.list_contacts` takes the same options.
 #### Batch create, get and remove (MillionSend extensions)
 
 ```rust
-use millionsend::{BatchContactsOptions, BatchRemoveContactsOptions, BatchValidation, OnConflict};
+use millionsend::{BatchContactsOptions, BatchRemoveContactsOptions, BatchValidation, DeleteContactOptions, OnConflict};
 
 let res = ms.contacts.create_batch(&contacts, Some(&BatchContactsOptions {
     on_conflict: Some(OnConflict::Upsert),                 // error (default) | skip | upsert
@@ -230,12 +232,16 @@ Up to 1000 contacts per call; each `data` entry carries the request `index`,
 the contact `id` and a `status` (`created` | `updated` | `skipped`).
 
 ```rust
-ms.contacts.batch_remove(&BatchRemoveContactsOptions::Ids(vec![id])).await?;              // POST /contacts/batch/remove
-ms.contacts.batch_remove(&BatchRemoveContactsOptions::Emails(vec!["a@acme.dev".into()])).await?;
+ms.contacts.batch_remove(&BatchRemoveContactsOptions::Ids(vec![id]), None).await?;              // POST /contacts/batch/remove
+ms.contacts.batch_remove(&BatchRemoveContactsOptions::Emails(vec!["a@acme.dev".into()]), None).await?;
+ms.contacts.batch_remove(&BatchRemoveContactsOptions::Ids(vec![id]), Some(&DeleteContactOptions { erase: true })).await?; // { "ids": [...], "erase": true }
 ```
 
 Exactly one of ids or emails, up to 1000; `data` lists only the contacts
 actually deleted (`{ object, contact, deleted }`), unknown ones are skipped.
+Either way the contacts' emails stay in the send log; `erase: true` also scrubs
+each address from email history, event payloads and API logs (a GDPR/LGPD
+erasure). Needs MillionSend v0.6.54.
 
 ```rust
 use millionsend::{BatchGetContactsOptions, ContactAddress, ContactInclude};

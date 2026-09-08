@@ -61,7 +61,7 @@ async fn contact_lifecycle() {
 
     let removed = ms
         .contacts
-        .delete(ContactAddress::email(email.as_str()))
+        .delete(ContactAddress::email(email.as_str()), None)
         .await
         .expect("delete contact");
     assert!(removed.deleted);

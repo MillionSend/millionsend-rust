@@ -149,7 +149,16 @@ impl Config {
     }
 
     pub(crate) async fn delete<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T> {
-        self.run(self.client.delete(self.url(segments))).await
+        self.delete_with(segments, &[]).await
+    }
+
+    pub(crate) async fn delete_with<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&'static str, String)],
+    ) -> Result<T> {
+        let url = self.url_with_query(segments, query);
+        self.run(self.client.delete(url)).await
     }
 
     async fn run<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {

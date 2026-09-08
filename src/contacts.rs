@@ -10,9 +10,9 @@ use crate::types::{
     BatchRemoveContactsResponse, BatchValidation, Contact, ContactAddress, ContactId,
     ContactInclude, ContactListItem, ContactPreferencesLink, ContactProperty, ContactPropertyId,
     ContactTopic, ContactTopicUpdate, CreateContactOptions, CreateContactPropertyOptions,
-    DeleteContactPropertyResponse, DeleteContactResponse, List, ListContactsOptions, ListOptions,
-    RemoveContactSegmentResponse, UpdateContactOptions, UpdateContactPropertyOptions,
-    UpdateContactTopicsResponse,
+    DeleteContactOptions, DeleteContactPropertyResponse, DeleteContactResponse, List,
+    ListContactsOptions, ListOptions, RemoveContactSegmentResponse, UpdateContactOptions,
+    UpdateContactPropertyOptions, UpdateContactTopicsResponse,
 };
 
 /// Contacts — team-global, addressable by id or email (email wins). Mirrors
@@ -87,13 +87,23 @@ impl Contacts {
             .await
     }
 
-    /// `DELETE /contacts/:idOrEmail`
+    /// `DELETE /contacts/:idOrEmail` — the contact's emails stay in the send
+    /// log; `erase` (`?erase=true`) also scrubs the address from email
+    /// history, event payloads and API logs.
     pub async fn delete(
         &self,
         address: impl Into<ContactAddress>,
+        options: Option<&DeleteContactOptions>,
     ) -> Result<DeleteContactResponse> {
         let address = address.into();
-        self.config.delete(&["contacts", address.key()]).await
+        let query: Vec<_> = options
+            .filter(|o| o.erase)
+            .map(|_| ("erase", "true".to_string()))
+            .into_iter()
+            .collect();
+        self.config
+            .delete_with(&["contacts", address.key()], &query)
+            .await
     }
 
     /// `GET /contacts` — `include` attaches `properties` and/or `topics` to
@@ -124,13 +134,19 @@ impl Contacts {
     }
 
     /// `POST /contacts/batch/remove` — by ids or by emails, up to 1000
-    /// (MillionSend extension). Lists only the contacts actually deleted.
+    /// (MillionSend extension). Lists only the contacts actually deleted;
+    /// `erase` scrubs the addresses like on [`Contacts::delete`].
     pub async fn batch_remove(
         &self,
-        options: &BatchRemoveContactsOptions,
+        contacts: &BatchRemoveContactsOptions,
+        options: Option<&DeleteContactOptions>,
     ) -> Result<BatchRemoveContactsResponse> {
+        let body = BatchRemoveContactsBody {
+            contacts,
+            erase: options.is_some_and(|o| o.erase).then_some(true),
+        };
         self.config
-            .post(&["contacts", "batch", "remove"], options)
+            .post(&["contacts", "batch", "remove"], &body)
             .await
     }
 
@@ -249,4 +265,12 @@ struct BatchGetContactsBody<'a> {
     contacts: &'a [ContactAddress],
     #[serde(skip_serializing_if = "Option::is_none")]
     include: Option<&'a [ContactInclude]>,
+}
+
+#[derive(Serialize)]
+struct BatchRemoveContactsBody<'a> {
+    #[serde(flatten)]
+    contacts: &'a BatchRemoveContactsOptions,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    erase: Option<bool>,
 }
