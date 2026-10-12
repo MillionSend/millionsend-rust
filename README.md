@@ -196,7 +196,7 @@ let page = ms.receiving.list(Some(&ListReceivedEmailsOptions {
     wait: Some(30),
     ..Default::default()
 })).await?;
-// page.data: what arrived; page.held: Vec<HeldEmail { id, inbox_id, reason, created_at }>,
+// page.data: what arrived; page.held: Vec<HeldEmail { id, inbox_id, reason, quarantine_reason, created_at }>,
 // matches held for screening or quarantine
 
 // Reply and forward from the server, threaded
@@ -213,10 +213,10 @@ ms.receiving.forward(&id, &ForwardReceivedEmailOptions {
 ```
 
 `ListReceivedEmailsOptions` also takes `before`/`after`, `since`, `to`,
-`subject_contains`, `unread` (with `inbox_id`) and `include_quarantined`
-(full-access keys). Replies and forwards return a `SendOutcome`: `Sent` once
-the email went out, or `Draft` when an inbox's rules hold it for a person to
-approve (HTTP 202).
+`subject_contains`, `unread` (with `inbox_id`), and `include_quarantined` or
+`quarantined` (held mail too, or held mail only; full-access keys). Replies and
+forwards return a `SendOutcome`: `Sent` once the email went out, or `Draft`
+when an inbox's rules hold it for a person to approve (HTTP 202).
 
 ### Inboxes (beta)
 
@@ -289,7 +289,7 @@ ms.inboxes.threads().update(&inbox.id, &thread_id, &UpdateInboxThreadOptions {
 ms.inboxes.threads().delete(&inbox.id, &thread_id).await?;         // to trash, purged after 30 days
 let emails = ms.inboxes.threads().emails();
 emails.list(&inbox.id, &thread_id, None).await?;                   // oldest first
-emails.get(&inbox.id, &thread_id, &email_id).await?;
+emails.get(&inbox.id, &thread_id, &email_id, None).await?;         // both take include_quarantined (owner views)
 let reply = ReplyInThreadOptions { text: Some("On it.".into()), ..Default::default() };
 emails.reply(&inbox.id, &thread_id, &email_id, reply.with_idempotency_key("k1")).await?;
 emails.forward(&inbox.id, &thread_id, &email_id, &ForwardInThreadOptions {

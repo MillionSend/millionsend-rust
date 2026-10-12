@@ -2324,6 +2324,14 @@ async fn receiving_list_sends_every_filter_and_parses_held() {
     ms.receiving.list(None).await.unwrap();
     let requests = server.received_requests().await.unwrap();
     assert_eq!(requests[1].url.query(), None);
+
+    let held_only = ListReceivedEmailsOptions {
+        quarantined: true,
+        ..Default::default()
+    };
+    ms.receiving.list(Some(&held_only)).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[2].url.query(), Some("quarantined=true"));
 }
 
 /// A long-poll outlives the client's own timeout by the time it may wait.
@@ -2989,6 +2997,7 @@ async fn inbox_thread_emails_list_get_reply_forward() {
     Mock::given(method("GET"))
         .and(path("/inboxes/i1/threads/t1/emails"))
         .and(query_param("after", "m0"))
+        .and(query_param("include_quarantined", "true"))
         .respond_with(ok_json(
             json!({ "object": "list", "has_more": false, "data": [inbound.clone()] }),
         ))
@@ -2996,6 +3005,7 @@ async fn inbox_thread_emails_list_get_reply_forward() {
         .await;
     Mock::given(method("GET"))
         .and(path("/inboxes/i1/threads/t1/emails/m1"))
+        .and(query_param("include_quarantined", "true"))
         .respond_with(ok_json(inbound))
         .mount(&server)
         .await;
@@ -3023,8 +3033,9 @@ async fn inbox_thread_emails_list_get_reply_forward() {
 
     let ms = MillionSend::with_base_url("ms_test", server.uri());
     let emails = ms.inboxes.threads().emails();
-    let options = ListOptions {
+    let options = ListInboxThreadEmailsOptions {
         after: Some("m0".into()),
+        include_quarantined: true,
         ..Default::default()
     };
     let list = emails.list("i1", "t1", Some(&options)).await.unwrap();
@@ -3035,7 +3046,14 @@ async fn inbox_thread_emails_list_get_reply_forward() {
     assert_eq!(list.data[0].attachments[0].size, None);
     assert_eq!(
         emails
-            .get("i1", "t1", "m1")
+            .get(
+                "i1",
+                "t1",
+                "m1",
+                Some(&GetInboxThreadEmailOptions {
+                    include_quarantined: true
+                })
+            )
             .await
             .unwrap()
             .extracted_text

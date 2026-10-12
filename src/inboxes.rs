@@ -4,8 +4,9 @@ use crate::error::Result;
 use crate::http::Config;
 use crate::types::{
     list_query, CreateInboxDraftOptions, CreateInboxLabelOptions, CreateInboxOptions, Deleted,
-    ForwardInThreadOptions, Idempotent, Inbox, InboxDraft, InboxDraftSent, InboxLabel, InboxSafety,
-    InboxSafetyUpdate, InboxThread, InboxThreadEmail, InboxThreadListItem, LatestCodeOptions, List,
+    ForwardInThreadOptions, GetInboxThreadEmailOptions, Idempotent, Inbox, InboxDraft,
+    InboxDraftSent, InboxLabel, InboxSafety, InboxSafetyUpdate, InboxThread, InboxThreadEmail,
+    InboxThreadListItem, LatestCodeOptions, List, ListInboxThreadEmailsOptions,
     ListInboxThreadsOptions, ListInboxesOptions, ListOptions, QuarantineRelease, QuarantinedEmail,
     ReleaseQuarantinedOptions, ReplyInThreadOptions, SearchInboxThreadsOptions, SendOutcome,
     UpdateInboxDraftOptions, UpdateInboxLabelOptions, UpdateInboxOptions, UpdateInboxThreadOptions,
@@ -260,12 +261,13 @@ impl InboxThreadEmails {
         &self,
         inbox_id: &str,
         thread_id: &str,
-        options: Option<&ListOptions>,
+        options: Option<&ListInboxThreadEmailsOptions>,
     ) -> Result<List<InboxThreadEmail>> {
+        let query = options.map(|o| o.to_query()).unwrap_or_default();
         self.0
             .get(
                 &["inboxes", inbox_id, "threads", thread_id, "emails"],
-                &list_query(options),
+                &query,
             )
             .await
     }
@@ -276,13 +278,15 @@ impl InboxThreadEmails {
         inbox_id: &str,
         thread_id: &str,
         email_id: &str,
+        options: Option<&GetInboxThreadEmailOptions>,
     ) -> Result<InboxThreadEmail> {
+        let query = options.map(|o| o.to_query()).unwrap_or_default();
         self.0
             .get(
                 &[
                     "inboxes", inbox_id, "threads", thread_id, "emails", email_id,
                 ],
-                &[],
+                &query,
             )
             .await
     }

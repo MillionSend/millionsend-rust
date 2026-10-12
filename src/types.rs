@@ -1605,14 +1605,15 @@ pub struct Screening {
 /// seconds) long-polls for mail newer than `before` or `since` (default: a
 /// minute before the call) and answers an empty page when nothing arrives.
 /// `from` is an address, or a domain covering its subdomains; `unread` needs
-/// `inbox_id`; `include_quarantined` (full-access keys) also lists held mail.
+/// `inbox_id`; `include_quarantined` (full-access keys) also lists held mail,
+/// `quarantined` lists held mail only.
 #[derive(Debug, Clone, Default)]
 pub struct ListReceivedEmailsOptions {
     pub limit: Option<u32>,
     pub after: Option<String>,
     pub before: Option<String>,
     pub wait: Option<u32>,
-    /// ISO 8601.
+    /// ISO 8601 with `Z` or an offset; without one the API answers 422.
     pub since: Option<String>,
     pub inbox_id: Option<String>,
     /// An address the message was delivered to.
@@ -1621,6 +1622,7 @@ pub struct ListReceivedEmailsOptions {
     pub subject_contains: Option<String>,
     pub unread: Option<bool>,
     pub include_quarantined: bool,
+    pub quarantined: bool,
 }
 
 impl ListReceivedEmailsOptions {
@@ -1640,6 +1642,7 @@ impl ListReceivedEmailsOptions {
             ("subject_contains", self.subject_contains.clone()),
             ("unread", self.unread.map(|u| u.to_string())),
             ("include_quarantined", flag(self.include_quarantined)),
+            ("quarantined", flag(self.quarantined)),
         ]));
         query
     }
@@ -2228,6 +2231,46 @@ pub struct UpdateInboxThreadOptions {
     pub folder: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub label_id: Option<String>,
+}
+
+/// Paginates `threads().emails().list` (oldest first; `after` pages toward
+/// newer). `include_quarantined` also lists held messages (full-access keys
+/// not scoped to an inbox).
+#[derive(Debug, Clone, Default)]
+pub struct ListInboxThreadEmailsOptions {
+    pub include_quarantined: bool,
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+}
+
+impl ListInboxThreadEmailsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        query.extend(present([(
+            "include_quarantined",
+            flag(self.include_quarantined),
+        )]));
+        query
+    }
+}
+
+/// `include_quarantined` reads a held message (full-access keys not scoped to
+/// an inbox); without it a quarantined one answers 403 `email_quarantined`.
+#[derive(Debug, Clone, Default)]
+pub struct GetInboxThreadEmailOptions {
+    pub include_quarantined: bool,
+}
+
+impl GetInboxThreadEmailOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        present([("include_quarantined", flag(self.include_quarantined))]).collect()
+    }
 }
 
 /// A message of a thread, in either direction. Inbound messages add
