@@ -80,22 +80,37 @@ impl Config {
         &self.base_url
     }
 
-    fn url(&self, segments: &[&str]) -> String {
+    /// The URL of `segments`, each percent-encoded. An empty, "." or ".."
+    /// segment is refused: URL normalization resolves those away, so an id
+    /// such as ".." would send the request to another resource
+    /// (DELETE /inboxes/{id}/labels/.. deletes the inbox).
+    fn url(&self, segments: &[&str]) -> Result<String> {
+        if segments.iter().any(|s| matches!(*s, "" | "." | "..")) {
+            return Err(Error::Api(ApiError {
+                status_code: None,
+                name: "validation_error".to_string(),
+                message: r#"An id in the request path is empty, "." or ".."."#.to_string(),
+            }));
+        }
         let mut url = self.base_url.clone();
         for &segment in segments {
             url.push('/');
             let _ = write!(url, "{}", utf8_percent_encode(segment, COMPONENT));
         }
-        url
+        Ok(url)
     }
 
-    fn url_with_query(&self, segments: &[&str], query: &[(&'static str, String)]) -> String {
-        let mut url = self.url(segments);
+    fn url_with_query(
+        &self,
+        segments: &[&str],
+        query: &[(&'static str, String)],
+    ) -> Result<String> {
+        let mut url = self.url(segments)?;
         for (i, (key, value)) in query.iter().enumerate() {
             url.push(if i == 0 { '?' } else { '&' });
             let _ = write!(url, "{}={}", key, utf8_percent_encode(value, COMPONENT));
         }
-        url
+        Ok(url)
     }
 
     pub(crate) async fn get<T: DeserializeOwned>(
@@ -103,7 +118,7 @@ impl Config {
         segments: &[&str],
         query: &[(&'static str, String)],
     ) -> Result<T> {
-        let url = self.url_with_query(segments, query);
+        let url = self.url_with_query(segments, query)?;
         self.run(self.client.get(url)).await
     }
 
@@ -115,7 +130,7 @@ impl Config {
         query: &[(&'static str, String)],
         wait: Option<u32>,
     ) -> Result<T> {
-        let mut req = self.client.get(self.url_with_query(segments, query));
+        let mut req = self.client.get(self.url_with_query(segments, query)?);
         if let Some(wait) = wait.filter(|&wait| wait > 0) {
             req = req.timeout(REQUEST_TIMEOUT + Duration::from_secs(wait.into()));
         }
@@ -130,7 +145,7 @@ impl Config {
         body: Option<&B>,
         idempotency_key: Option<&str>,
     ) -> Result<SendOutcome<T>> {
-        let mut req = self.client.post(self.url(segments));
+        let mut req = self.client.post(self.url(segments)?);
         if let Some(body) = body {
             req = req.json(body);
         }
@@ -167,7 +182,7 @@ impl Config {
     ) -> Result<T> {
         let mut req = self
             .client
-            .post(self.url_with_query(segments, query))
+            .post(self.url_with_query(segments, query)?)
             .json(body);
         for (name, value) in headers {
             if let Some(value) = value {
@@ -178,7 +193,7 @@ impl Config {
     }
 
     pub(crate) async fn post_empty<T: DeserializeOwned>(&self, segments: &[&str]) -> Result<T> {
-        self.run(self.client.post(self.url(segments))).await
+        self.run(self.client.post(self.url(segments)?)).await
     }
 
     pub(crate) async fn patch<B: Serialize + ?Sized, T: DeserializeOwned>(
@@ -186,7 +201,7 @@ impl Config {
         segments: &[&str],
         body: &B,
     ) -> Result<T> {
-        self.run(self.client.patch(self.url(segments)).json(body))
+        self.run(self.client.patch(self.url(segments)?).json(body))
             .await
     }
 
@@ -199,7 +214,7 @@ impl Config {
         segments: &[&str],
         query: &[(&'static str, String)],
     ) -> Result<T> {
-        let url = self.url_with_query(segments, query);
+        let url = self.url_with_query(segments, query)?;
         self.run(self.client.delete(url)).await
     }
 

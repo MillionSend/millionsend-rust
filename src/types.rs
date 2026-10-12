@@ -1772,14 +1772,16 @@ pub struct ReceivedEmailList {
     pub held: Vec<HeldEmail>,
 }
 
-/// A long-poll match an inbox held back; `reason` is unset while it is still
-/// being screened.
+/// A long-poll match an inbox held back. `reason` is `pending` (still being
+/// screened) or `quarantined`; `quarantine_reason` says why, unset while
+/// pending. `inbox_id` is unset for a catch-all copy held for a virus.
 #[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
 #[serde(default)]
 pub struct HeldEmail {
     pub id: String,
     pub inbox_id: Option<String>,
     pub reason: Option<String>,
+    pub quarantine_reason: Option<String>,
     pub created_at: String,
 }
 

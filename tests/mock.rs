@@ -28,6 +28,30 @@ async fn refuses_non_loopback_http_unless_allowed() {
 }
 
 #[tokio::test]
+async fn never_sends_a_path_an_empty_or_dot_id_would_redirect() {
+    let server = MockServer::start().await;
+    Mock::given(method("DELETE"))
+        .and(path("/inboxes/i1/labels/..."))
+        .respond_with(ok_json(
+            json!({ "object": "inbox_label", "id": "...", "deleted": true }),
+        ))
+        .expect(1)
+        .mount(&server)
+        .await;
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    for err in [
+        ms.inboxes.labels().delete("i1", "..").await.unwrap_err(),
+        ms.inboxes.threads().delete("i1", ".").await.unwrap_err(),
+    ] {
+        assert_eq!(err.name(), Some("validation_error"));
+        assert_eq!(err.status_code(), None);
+    }
+    let err = ms.emails.get("").await.unwrap_err();
+    assert_eq!(err.name(), Some("validation_error"));
+    ms.inboxes.labels().delete("i1", "...").await.unwrap();
+}
+
+#[tokio::test]
 async fn with_client_applies_custom_timeout() {
     let server = MockServer::start().await;
     Mock::given(method("GET"))
@@ -2243,10 +2267,11 @@ async fn receiving_list_sends_every_filter_and_parses_held() {
                        "screening": { "verdict": "clean", "sender_trust": "external" },
                        "extracted": { "kinds": ["code"] }, "read": false, "inbox_id": "i1",
                        "thread_id": "t1", "spam_verdict": "pass", "virus_verdict": null }],
-            "held": [{ "id": "r2", "inbox_id": "i1", "reason": "not_allowlisted",
+            "held": [{ "id": "r2", "inbox_id": "i1", "reason": "quarantined",
+                       "quarantine_reason": "not_allowlisted",
                        "created_at": "2026-10-12T10:00:00.000Z" },
-                     { "id": "r3", "inbox_id": "i1", "reason": null,
-                       "created_at": "2026-10-12T10:00:01.000Z" }]
+                     { "id": "r3", "inbox_id": "i1", "reason": "pending",
+                       "quarantine_reason": null, "created_at": "2026-10-12T10:00:01.000Z" }]
         })))
         .mount(&server)
         .await;
@@ -2282,13 +2307,15 @@ async fn receiving_list_sends_every_filter_and_parses_held() {
             HeldEmail {
                 id: "r2".into(),
                 inbox_id: Some("i1".into()),
-                reason: Some("not_allowlisted".into()),
+                reason: Some("quarantined".into()),
+                quarantine_reason: Some("not_allowlisted".into()),
                 created_at: "2026-10-12T10:00:00.000Z".into(),
             },
             HeldEmail {
                 id: "r3".into(),
                 inbox_id: Some("i1".into()),
-                reason: None,
+                reason: Some("pending".into()),
+                quarantine_reason: None,
                 created_at: "2026-10-12T10:00:01.000Z".into(),
             },
         ]
