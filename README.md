@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.8"
+millionsend = "0.9"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -63,7 +63,8 @@ assert_eq!(ms.base_url(), "https://mail.acme.dev");
 let ms = MillionSend::from_env()?;
 
 // Bring your own reqwest client (proxies, TLS, timeouts). The default has a
-// 30s request timeout and a 10s connect timeout.
+// 30s request timeout and a 10s connect timeout; a long-poll (`wait`) gets
+// 30s plus its wait.
 let ms = MillionSend::new("ms_123").with_client(reqwest::Client::new());
 
 // Accept a non-loopback http:// base URL (refused by default).
@@ -86,7 +87,9 @@ Fallible calls return `Result<T, millionsend::Error>`:
 - `Error::Api(ApiError { status_code, name, message })` — a non-2xx response.
   `name` is a stable snake_case code you can match on (`validation_error`,
   `not_found`, `restricted_api_key`, `sending_paused`,
-  `all_recipients_suppressed`, …).
+  `all_recipients_suppressed`, and for receiving and inboxes
+  `inbox_send_policy`, `inbox_send_cap_reached`, `approval_required`,
+  `email_quarantined`, `email_blocked`, `too_many_waits`, …).
 - `Error::Http(_)` — a transport failure that never reached the API;
   `err.status_code()` is `None`.
 - `Error::Parse(_)` — a 2xx body that failed to deserialize.
@@ -161,6 +164,166 @@ for err in &res.errors {
     eprintln!("email #{} rejected: {}", err.index, err.message);
 }
 ```
+
+### Receiving
+
+Mail your domains receive: Resend's `receiving` plus MillionSend's long-poll,
+server-side reply and forward, and erase. Inbox-scoped keys never see mail
+held for screening or in quarantine.
+
+```rust
+use millionsend::{
+    ForwardReceivedEmailOptions, GetReceivedEmailOptions, IdempotentTrait,
+    ListReceivedEmailsOptions, ReplyReceivedEmailOptions, SendOutcome,
+};
+
+let page = ms.receiving.list(None).await?;                         // GET /emails/receiving
+let email = ms.receiving.get(&id, None).await?;                    // GET /emails/receiving/:id
+let email = ms.receiving.get(&id, Some(&GetReceivedEmailOptions {
+    html_format: Some("cid".into()),                               // default data_uri
+})).await?;
+// email.extracted_text: the visible text, hidden text and invisible characters removed
+// email.screening: Option<Screening { verdict, sender_trust, injection_score, … }>
+// email.extracted: Option<ReceivedEmailExtracted { kinds, code, link, … }> on verification mail
+ms.receiving.attachments().list(&id, None).await?;                 // each with a signed download_url (1 hour)
+ms.receiving.attachments().get(&id, &attachment_id).await?;
+ms.receiving.delete(&id).await?;                                   // erase now (full-access keys)
+
+// Long-poll: wait up to 50 s for the next match
+let page = ms.receiving.list(Some(&ListReceivedEmailsOptions {
+    inbox_id: Some(inbox_id.clone()),
+    from: Some("github.com".into()),                               // an address, or a domain and its subdomains
+    wait: Some(30),
+    ..Default::default()
+})).await?;
+// page.data: what arrived; page.held: Vec<HeldEmail { id, inbox_id, reason, created_at }>,
+// matches held for screening or quarantine
+
+// Reply and forward from the server, threaded
+let reply = ReplyReceivedEmailOptions { text: Some("Thanks!".into()), ..Default::default() };
+match ms.receiving.reply(&id, reply.with_idempotency_key("reply-1")).await? {
+    SendOutcome::Sent(sent) => println!("sent {}", sent.id),
+    SendOutcome::Draft(draft) => println!("held for approval: {:?}", draft.approval_reasons),
+}
+ms.receiving.forward(&id, &ForwardReceivedEmailOptions {
+    to: "ops@acme.dev".into(),
+    mode: Some("attachment".into()),                               // the original as an .eml
+    ..Default::default()
+}).await?;
+```
+
+`ListReceivedEmailsOptions` also takes `before`/`after`, `since`, `to`,
+`subject_contains`, `unread` (with `inbox_id`) and `include_quarantined`
+(full-access keys). Replies and forwards return a `SendOutcome`: `Sent` once
+the email went out, or `Draft` when an inbox's rules hold it for a person to
+approve (HTTP 202).
+
+### Inboxes (beta)
+
+Addresses whose mail lands in threads, for an agent (`kind: "agent"`, the
+default: screening, code extraction and send rules on) or for people
+(`kind: "human"`). Mirrors Resend's Inboxes beta; `safety()`, `codes()` and
+`quarantine()` are MillionSend extensions.
+
+```rust
+use millionsend::{
+    CreateInboxDraftOptions, CreateInboxLabelOptions, CreateInboxOptions, ForwardInThreadOptions,
+    IdempotentTrait, InboxSafetyUpdate, LatestCodeOptions, ListInboxThreadsOptions,
+    ReleaseQuarantinedOptions, ReplyInThreadOptions, SearchInboxThreadsOptions,
+    UpdateInboxDraftOptions, UpdateInboxOptions, UpdateInboxThreadOptions,
+};
+
+let inbox = ms.inboxes.create(&CreateInboxOptions {
+    name: Some("Signup bot".into()),
+    expires_in: Some("24h".into()),                                // no email_address: a random shared-domain address
+    ..Default::default()
+}).await?;
+ms.inboxes.list(None).await?;
+ms.inboxes.get("support@acme.dev").await?;                         // by id or address
+ms.inboxes.update(&inbox.id, &UpdateInboxOptions {
+    name: Some("Support".into()),
+    expires_in: Some(None),                                        // null: never expires
+    ..Default::default()
+}).await?;
+ms.inboxes.delete(&inbox.id).await?;                               // also revokes its inbox-scoped keys
+
+// Safety rules: who may write in and what an agent may send
+ms.inboxes.safety().get(&inbox.id).await?;
+ms.inboxes.safety().update(&inbox.id, &InboxSafetyUpdate {
+    accept_from: Some("allowlist".into()),
+    allowlist: Some(vec!["*@stripe.com".into()]),
+    send_cap: Some(None),                                          // null: no daily cap
+    ..Default::default()
+}).await?;
+
+// Verification codes and sign-in links (never fetched); waits up to 50 s
+let code = ms.inboxes.codes().latest(&inbox.id, Some(&LatestCodeOptions {
+    from: Some("github.com".into()),
+    wait: Some(30),
+    ..Default::default()
+})).await?;
+// code.status: "found" | "none" | "ambiguous" | "timeout"; code.code or code.url
+
+// Quarantine: held mail is kept and listed; agents see it only once a person releases it
+ms.inboxes.quarantine().list(&inbox.id, None).await?;
+ms.inboxes.quarantine().release(&inbox.id, &email_id, Some(&ReleaseQuarantinedOptions {
+    trust_sender: Some(true),                                      // also allowlists the sender
+})).await?;
+
+// Threads and their messages
+ms.inboxes.threads().list(&inbox.id, Some(&ListInboxThreadsOptions {
+    folders: Some(vec!["inbox".into(), "archive".into()]),         // sent comma-separated
+    read: Some(false),
+    ..Default::default()
+})).await?;
+ms.inboxes.threads().search(&inbox.id, &SearchInboxThreadsOptions {
+    query: Some("invoice".into()),
+    from: Some(vec!["stripe.com".into()]),
+    ..Default::default()
+}).await?;
+ms.inboxes.threads().get(&inbox.id, &thread_id).await?;
+ms.inboxes.threads().update(&inbox.id, &thread_id, &UpdateInboxThreadOptions {
+    folder: Some("archive".into()),
+    ..Default::default()
+}).await?;
+ms.inboxes.threads().delete(&inbox.id, &thread_id).await?;         // to trash, purged after 30 days
+let emails = ms.inboxes.threads().emails();
+emails.list(&inbox.id, &thread_id, None).await?;                   // oldest first
+emails.get(&inbox.id, &thread_id, &email_id).await?;
+let reply = ReplyInThreadOptions { text: Some("On it.".into()), ..Default::default() };
+emails.reply(&inbox.id, &thread_id, &email_id, reply.with_idempotency_key("k1")).await?;
+emails.forward(&inbox.id, &thread_id, &email_id, &ForwardInThreadOptions {
+    to: "ops@acme.dev".into(),
+    ..Default::default()
+}).await?;
+
+// Labels
+let label = ms.inboxes.labels().create(&inbox.id, &CreateInboxLabelOptions {
+    name: "Billing".into(),
+    color: Some("#FFAA00".into()),
+}).await?;
+ms.inboxes.labels().list(&inbox.id).await?;                        // also update and delete
+
+// Drafts
+let draft = ms.inboxes.drafts().create(&inbox.id, &CreateInboxDraftOptions {
+    to: Some("ada@x.dev".into()),
+    subject: Some("Hello".into()),
+    text: Some("Hi Ada".into()),
+    ..Default::default()
+}).await?;
+ms.inboxes.drafts().update(&inbox.id, &draft.id, &UpdateInboxDraftOptions {
+    subject: Some(None),                                           // null clears
+    ..Default::default()
+}).await?;
+ms.inboxes.drafts().send(&inbox.id, &draft.id, Some("draft-1")).await?; // Idempotency-Key
+ms.inboxes.drafts().reject(&inbox.id, &draft.id).await?;           // approvers only
+```
+
+Thread replies, forwards and `drafts().send` return a `SendOutcome` like
+`receiving.reply`. An inbox-scoped key or an MCP token cannot send a draft
+that waits for approval (`approval_required`); a person in the dashboard or a
+full-access team key can. Resend's hosted agent settings
+(`/inboxes/:id/agent`) are not exposed: MillionSend runs no agent.
 
 ### Contacts
 
@@ -441,6 +604,10 @@ ms.domains.update(&domain.id, &UpdateDomainOptions {
     tracking_subdomain: Some(None),                        // null clears the branded host
     ..Default::default()
 }).await?;
+ms.domains.update(&domain.id, &UpdateDomainOptions {
+    receiving_catch_all: Some(true),                       // keep mail to addresses without an inbox (paid plans on Cloud)
+    ..Default::default()
+}).await?;
 ms.domains.delete(&domain.id).await?;
 ```
 
@@ -453,6 +620,7 @@ let hook = ms.webhooks.create(&CreateWebhookOptions {
     endpoint: "https://acme.dev/hooks/millionsend".into(),
     events: vec!["email.delivered".into(), "email.bounced".into(), "deliverability.paused".into()],
     signing_secret: None,                                  // minted; or pass your own whsec_…
+    inbox_ids: None,                                       // or Some(ids): inbox events of these inboxes only
 }).await?;
 println!("verify payloads with {}", hook.signing_secret);
 
@@ -460,6 +628,7 @@ ms.webhooks.list(None).await?;
 ms.webhooks.get(&hook.id).await?;                          // includes signing_secret, previous_secret_expires_at
 ms.webhooks.update(&hook.id, &UpdateWebhookOptions {
     status: Some(WebhookStatus::Disabled),
+    inbox_ids: Some(None),                                 // null: events of every inbox
     ..Default::default()
 }).await?;
 
@@ -476,8 +645,14 @@ ms.webhooks.delete(&hook.id).await?;
 `previous_secret_expires_at` every delivery carries both signatures, so the
 receiver can switch at any point in the window. Subscribable event names
 include `email.*`, `deliverability.*`, `contact.created`/`updated`/`deleted`/
-`unsubscribed`/`resubscribed`/`topic_opt_in`/`topic_opt_out` and
-`suppression.added`/`removed`.
+`unsubscribed`/`resubscribed`/`topic_opt_in`/`topic_opt_out`,
+`suppression.added`/`removed`, `email.received`, and the opt-in inbox events
+`inbox.created`, `inbox.updated`, `inbox.deleted`, `inbox.expired`,
+`inbox.thread.created`, `inbox.thread.folder.updated`,
+`inbox.thread.labels.updated`, `inbox.email.received`, `inbox.email.sent`,
+`inbox.email.quarantined`, `inbox.draft.created`, `inbox.draft.updated`,
+`inbox.draft.sent` and `inbox.draft.deleted`, which reach an endpoint only when
+its `events` name them.
 
 ### API keys
 
@@ -488,6 +663,7 @@ let key = ms.api_keys.create(&CreateApiKeyOptions {
     name: "ci".into(),
     permission: Some(ApiKeyPermission::SendingAccess),     // default full_access
     domain_id: Some(domain.id.clone()),                    // restrict sending to one domain
+    inbox_id: None,                                        // or a full_access key for one inbox only
 }).await?;
 println!("{}", key.token);                                 // shown once
 ms.api_keys.list(None).await?;
@@ -552,9 +728,9 @@ if let Some(cap) = usage.limits.emails_per_day {
 + let ms = MillionSend::new("ms_123"); // self-hosted: with_base_url("ms_123", "https://mail.acme.dev")
 ```
 
-Resource and method names match: `emails`, `batch`, `contacts`, `topics`,
-`broadcasts`, `segments`, `suppressions`, `domains`, `webhooks`, `api_keys`,
-`templates`. Notes:
+Resource and method names match: `emails`, `batch`, `receiving`, `contacts`,
+`topics`, `broadcasts`, `segments`, `suppressions`, `domains`, `webhooks`,
+`api_keys`, `templates`. Notes:
 
 - **Contacts nest** their sub-resources — `contacts.topics.list`/`update`,
   `contacts.segments.add`/`remove`, `contacts.properties.*` — where `resend-rs`
@@ -565,10 +741,15 @@ Resource and method names match: `emails`, `batch`, `contacts`, `topics`,
   are a compatibility shim and are not part of this SDK. Use `segments` (saved
   filters or manual lists) to target a subset, or a broadcast with no
   `segment_id`/`topic_id` to reach everyone.
+- **Received mail** attachments hang off `receiving.attachments()` where
+  `resend-rs` has `get_attachment`/`list_attachments`; `receiving.forward` is a
+  server-side forward taking `ForwardReceivedEmailOptions`.
 - **MillionSend extensions** with no Resend counterpart: `segments`,
   `contacts.create_batch`, `contacts.batch_get`, `contacts.batch_remove`,
   `contacts.preferences_link`,
-  `webhooks.rotate`, `deliverability`, `usage`, `emails.get_insights`.
+  `webhooks.rotate`, `deliverability`, `usage`, `emails.get_insights`, the
+  receiving long-poll, `receiving.reply`/`delete`, and `inboxes.safety()`,
+  `codes()` and `quarantine()`.
 - **Templates** are always published; `publish` is a no-op kept for
   compatibility, and `from`/`reply_to`/`variables` are rejected with 422.
 - **Nullable clears**: `Option<Option<T>>` fields (`Some(None)`) send JSON

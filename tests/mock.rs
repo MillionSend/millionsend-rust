@@ -1686,6 +1686,7 @@ async fn webhooks_cover_create_get_list_update_delete() {
             endpoint: "https://x.dev/hook".into(),
             events: vec!["email.delivered".into(), "email.bounced".into()],
             signing_secret: Some("whsec_abc".into()),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -1702,6 +1703,7 @@ async fn webhooks_cover_create_get_list_update_delete() {
         endpoint: Some("https://x.dev/hook2".into()),
         events: Some(vec!["email.opened".into()]),
         status: Some(WebhookStatus::Disabled),
+        ..Default::default()
     };
     assert_eq!(ms.webhooks.update("w1", &changes).await.unwrap().id, "w1");
     assert!(ms.webhooks.delete("w1").await.unwrap().deleted);
@@ -1745,6 +1747,7 @@ async fn api_keys_cover_create_list_delete() {
             name: "ci".into(),
             permission: Some(ApiKeyPermission::SendingAccess),
             domain_id: Some("d1".into()),
+            ..Default::default()
         })
         .await
         .unwrap();
@@ -2188,4 +2191,1095 @@ async fn webhooks_rotate_sends_empty_object_or_options() {
         .unwrap();
     assert_eq!(own.signing_secret, "whsec_mine");
     assert!(own.previous_secret_expires_at.is_none());
+}
+
+// ---- receiving and inboxes -----------------------------------------------
+
+fn draft_json(status: &str) -> serde_json::Value {
+    json!({
+        "object": "inbox_draft", "id": "d1", "type": "reply", "to": ["ada@x.dev"], "cc": [], "bcc": [],
+        "subject": "Re: Hi", "html": null, "text": "Thanks", "thread_id": "t1", "reply_to_email_id": "m1",
+        "email_id": null, "created_at": "2026-10-12T10:00:00.000Z", "updated_at": "2026-10-12T10:00:00.000Z",
+        "status": status, "approval_reasons": ["send_policy", "ramp"], "forward": false,
+        "decided_by": null, "decided_at": null, "expires_at": "2026-10-19T10:00:00.000Z"
+    })
+}
+
+fn inbox_json() -> serde_json::Value {
+    json!({
+        "object": "inbox", "id": "i1", "name": "Signup bot",
+        "email_address": "signup-bot-7f3k@acme.agents.example", "domain_id": "sd1",
+        "receiving_address": null, "from_name": null, "unread": 2, "drafts": 1,
+        "last_received": "2026-10-12T10:00:00.000Z", "created_at": "2026-10-12T09:00:00.000Z",
+        "kind": "agent", "shared": true, "expires_at": "2026-10-13T09:00:00.000Z",
+        "quarantined": 1, "pending_approval": 1
+    })
+}
+
+fn draft_of<T: std::fmt::Debug>(outcome: SendOutcome<T>) -> InboxDraft {
+    match outcome {
+        SendOutcome::Draft(draft) => *draft,
+        SendOutcome::Sent(sent) => panic!("expected a draft, got {sent:?}"),
+    }
+}
+
+fn sent_of<T>(outcome: SendOutcome<T>) -> T {
+    match outcome {
+        SendOutcome::Sent(sent) => sent,
+        SendOutcome::Draft(draft) => panic!("expected a sent email, got draft {}", draft.id),
+    }
+}
+
+#[tokio::test]
+async fn receiving_list_sends_every_filter_and_parses_held() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "r1", "from": "a@x.dev", "to": [], "cc": [], "bcc": [], "reply_to": [],
+                       "received_for": ["bot@acme.dev"], "subject": "Code", "message_id": "<m@x.dev>",
+                       "created_at": "2026-10-12T10:00:00.000Z", "attachments": [],
+                       "screening": { "verdict": "clean", "sender_trust": "external" },
+                       "extracted": { "kinds": ["code"] }, "read": false, "inbox_id": "i1",
+                       "thread_id": "t1", "spam_verdict": "pass", "virus_verdict": null }],
+            "held": [{ "id": "r2", "inbox_id": "i1", "reason": "not_allowlisted",
+                       "created_at": "2026-10-12T10:00:00.000Z" },
+                     { "id": "r3", "inbox_id": "i1", "reason": null,
+                       "created_at": "2026-10-12T10:00:01.000Z" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let options = ListReceivedEmailsOptions {
+        limit: Some(10),
+        before: Some("r0".into()),
+        wait: Some(30),
+        since: Some("2026-10-12T00:00:00Z".into()),
+        inbox_id: Some("i1".into()),
+        to: Some("bot@x.dev".into()),
+        from: Some("stripe.com".into()),
+        subject_contains: Some("code".into()),
+        unread: Some(false),
+        include_quarantined: true,
+        ..Default::default()
+    };
+    let page = ms.receiving.list(Some(&options)).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].url.query(),
+        Some("limit=10&before=r0&wait=30&since=2026-10-12T00%3A00%3A00Z&inbox_id=i1&to=bot%40x.dev&from=stripe.com&subject_contains=code&unread=false&include_quarantined=true")
+    );
+    let email = &page.data[0];
+    assert_eq!(email.screening.as_ref().unwrap().sender_trust, "external");
+    assert_eq!(email.extracted.as_ref().unwrap().kinds, vec!["code"]);
+    assert_eq!(email.read, Some(false));
+    assert!(email.virus_verdict.is_none());
+    assert_eq!(
+        page.held,
+        vec![
+            HeldEmail {
+                id: "r2".into(),
+                inbox_id: Some("i1".into()),
+                reason: Some("not_allowlisted".into()),
+                created_at: "2026-10-12T10:00:00.000Z".into(),
+            },
+            HeldEmail {
+                id: "r3".into(),
+                inbox_id: Some("i1".into()),
+                reason: None,
+                created_at: "2026-10-12T10:00:01.000Z".into(),
+            },
+        ]
+    );
+
+    ms.receiving.list(None).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[1].url.query(), None);
+}
+
+/// A long-poll outlives the client's own timeout by the time it may wait.
+#[tokio::test]
+async fn long_polls_stretch_the_request_timeout() {
+    let server = MockServer::start().await;
+    let slow = |body: serde_json::Value| ok_json(body).set_delay(Duration::from_millis(200));
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving"))
+        .respond_with(slow(
+            json!({ "object": "list", "has_more": false, "data": [], "held": [] }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/codes/latest"))
+        .respond_with(slow(
+            json!({ "object": "verification_code", "status": "timeout" }),
+        ))
+        .mount(&server)
+        .await;
+
+    let client = reqwest::Client::builder()
+        .timeout(Duration::from_millis(50))
+        .build()
+        .unwrap();
+    let ms = MillionSend::with_base_url("ms_test", server.uri()).with_client(client);
+    match ms.receiving.list(None).await.unwrap_err() {
+        Error::Http(e) => assert!(e.is_timeout(), "{e}"),
+        other => panic!("expected a timeout, got {other}"),
+    }
+    let waiting = ListReceivedEmailsOptions {
+        wait: Some(1),
+        ..Default::default()
+    };
+    assert!(ms
+        .receiving
+        .list(Some(&waiting))
+        .await
+        .unwrap()
+        .data
+        .is_empty());
+    let code = ms
+        .inboxes
+        .codes()
+        .latest(
+            "i1",
+            Some(&LatestCodeOptions {
+                wait: Some(1),
+                ..Default::default()
+            }),
+        )
+        .await
+        .unwrap();
+    assert_eq!(code.status, "timeout");
+}
+
+#[tokio::test]
+async fn receiving_get_parses_extensions_and_tolerates_unknown_values() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving/r1"))
+        .and(query_param("html_format", "cid"))
+        .respond_with(ok_json(json!({
+            "object": "email", "id": "r1", "from": "noreply@github.com", "to": ["bot@acme.dev"],
+            "cc": [], "bcc": [], "reply_to": [], "received_for": ["bot@acme.dev"], "subject": "Your code",
+            "message_id": "<m@github.com>", "created_at": "2026-10-12T10:00:00.000Z",
+            "html": "<p>482913</p>", "html_format": "cid", "text": "Your code is 482913",
+            "headers": { "from": "GitHub <noreply@github.com>" },
+            "authentication": { "spf": "pass", "dkim": "pass", "dmarc": "gray" }, "raw": null,
+            "attachments": [{ "id": "a1", "filename": null, "content_type": "image/png", "content_id": "logo",
+                              "content_disposition": "inline", "size": 120 }],
+            "inbox_id": "i1", "thread_id": "t1",
+            "inboxes": [{ "inbox_id": "i1", "thread_id": "t1", "verdict": "cosmic" }],
+            "screening": { "verdict": "clean", "sender_trust": "external", "quarantine_reason": null,
+                           "reasons": ["targets_agent"], "injection_score": 3, "phishing_score": null,
+                           "hidden_text_removed": true },
+            "spam_verdict": "gray", "spam_score": 31, "virus_verdict": "processing_failed",
+            "virus_signature": null, "extracted_text": "Your code is 482913",
+            "extracted": { "kinds": ["code"], "code": "482913", "link": null,
+                           "link_domain_matches_sender": null, "ambiguous": false },
+            "brand_new": { "verdict": "cosmic" }
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let options = GetReceivedEmailOptions {
+        html_format: Some("cid".into()),
+    };
+    let email = ms.receiving.get("r1", Some(&options)).await.unwrap();
+    assert!(email.raw.is_none());
+    assert_eq!(email.authentication.unwrap().dmarc, "gray");
+    assert_eq!(
+        email.headers.unwrap()["from"],
+        "GitHub <noreply@github.com>"
+    );
+    assert_eq!(email.attachments[0].filename, None);
+    assert_eq!(email.attachments[0].size, Some(120));
+    assert_eq!(email.inboxes.unwrap()[0].verdict, "cosmic");
+    let screening = email.screening.unwrap();
+    assert_eq!(screening.injection_score, Some(3));
+    assert_eq!(screening.phishing_score, None);
+    assert!(screening.hidden_text_removed);
+    assert_eq!(email.spam_score, Some(31));
+    assert_eq!(email.virus_verdict.as_deref(), Some("processing_failed"));
+    let extracted = email.extracted.unwrap();
+    assert_eq!(extracted.code.as_deref(), Some("482913"));
+    assert!(extracted.link_domain_matches_sender.is_none());
+}
+
+#[tokio::test]
+async fn receiving_reply_tells_sent_from_drafted() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails/receiving/r1/reply"))
+        .and(header("idempotency-key", "rk-1"))
+        .and(body_json(json!({
+            "text": "Thanks", "html": "<p>Thanks</p>", "subject": "Re: Hi", "cc": ["c@x.dev"],
+            "bcc": "b@x.dev", "reply_all": true, "requires_approval": true, "from": "bot@acme.dev",
+            "inbox_id": "i1"
+        })))
+        .respond_with(ok_json(
+            json!({ "object": "email", "id": "e9", "thread_id": "t1", "inbox_id": "i1" }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/emails/receiving/r2/reply"))
+        .and(body_json(json!({ "text": "Thanks" })))
+        .respond_with(ResponseTemplate::new(202).set_body_json(draft_json("pending_approval")))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let reply = ReplyReceivedEmailOptions {
+        text: Some("Thanks".into()),
+        html: Some("<p>Thanks</p>".into()),
+        subject: Some("Re: Hi".into()),
+        cc: Some(vec!["c@x.dev"].into()),
+        bcc: Some("b@x.dev".into()),
+        reply_all: Some(true),
+        requires_approval: Some(true),
+        from: Some("bot@acme.dev".into()),
+        inbox_id: Some("i1".into()),
+    };
+    let sent = sent_of(
+        ms.receiving
+            .reply("r1", reply.with_idempotency_key("rk-1"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(
+        sent,
+        ReceivedEmailSent {
+            object: "email".into(),
+            id: "e9".into(),
+            thread_id: Some("t1".into()),
+            inbox_id: Some("i1".into()),
+        }
+    );
+
+    let plain = ReplyReceivedEmailOptions {
+        text: Some("Thanks".into()),
+        ..Default::default()
+    };
+    let draft = draft_of(ms.receiving.reply("r2", &plain).await.unwrap());
+    assert_eq!(draft.status, "pending_approval");
+    assert_eq!(draft.approval_reasons, vec!["send_policy", "ramp"]);
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests[1].headers.get("idempotency-key").is_none());
+}
+
+#[tokio::test]
+async fn receiving_forward_delete_and_attachments() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/emails/receiving/r1/forward"))
+        .and(header("idempotency-key", "fk-1"))
+        .and(body_json(json!({
+            "to": ["ops@acme.dev"], "text": "FYI", "from": "me@acme.dev", "mode": "attachment"
+        })))
+        .respond_with(ok_json(
+            json!({ "object": "email", "id": "e9", "thread_id": null, "inbox_id": null }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/emails/receiving/r1"))
+        .respond_with(ok_json(
+            json!({ "object": "email", "id": "r1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving/r1/attachments"))
+        .and(query_param("limit", "5"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "a1", "filename": "invoice.pdf", "size": 48213,
+                       "content_type": "application/pdf", "content_disposition": "attachment",
+                       "download_url": "https://api.test/d/a1", "expires_at": "2026-10-12T11:00:00.000Z" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving/r1/attachments/a1"))
+        .respond_with(ok_json(json!({
+            "object": "attachment", "id": "a1", "size": 48213, "content_type": "application/pdf",
+            "content_disposition": "attachment", "download_url": "https://api.test/d/a1",
+            "expires_at": "2026-10-12T11:00:00.000Z"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let forward = ForwardReceivedEmailOptions {
+        to: vec!["ops@acme.dev"].into(),
+        text: Some("FYI".into()),
+        from: Some("me@acme.dev".into()),
+        mode: Some("attachment".into()),
+        ..Default::default()
+    };
+    let sent = sent_of(
+        ms.receiving
+            .forward("r1", forward.with_idempotency_key("fk-1"))
+            .await
+            .unwrap(),
+    );
+    assert!(sent.thread_id.is_none());
+    assert!(ms.receiving.delete("r1").await.unwrap().deleted);
+    let options = ListOptions {
+        limit: Some(5),
+        ..Default::default()
+    };
+    let list = ms
+        .receiving
+        .attachments()
+        .list("r1", Some(&options))
+        .await
+        .unwrap();
+    assert_eq!(
+        list.data[0].download_url.as_deref(),
+        Some("https://api.test/d/a1")
+    );
+    let one = ms.receiving.attachments().get("r1", "a1").await.unwrap();
+    assert_eq!(one.object.as_deref(), Some("attachment"));
+    assert_eq!(one.filename, None);
+}
+
+#[tokio::test]
+async fn inboxes_cover_create_list_get_update_delete() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes"))
+        .and(body_json(json!({})))
+        .respond_with(ResponseTemplate::new(201).set_body_json(inbox_json()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes"))
+        .and(body_json(json!({
+            "email_address": "bot@acme.dev", "name": "Bot", "from_name": "Acme Bot", "forwarding": true,
+            "kind": "human", "expires_in": "7d",
+            "safety": { "accept_from": "allowlist", "allowlist": ["*@stripe.com"], "send_cap": null }
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(inbox_json()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes"))
+        .and(query_param("kind", "agent"))
+        .and(query_param("limit", "2"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "i1", "name": null, "email_address": "bot@acme.dev", "from_name": null,
+                       "unread": 0, "last_received": null, "kind": "agent", "shared": false,
+                       "expires_at": null }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/bot%2Bsales%40acme.dev"))
+        .respond_with(ok_json(inbox_json()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/inboxes/i1"))
+        .and(body_json(
+            json!({ "name": "Renamed", "from_name": "", "expires_in": null }),
+        ))
+        .respond_with(ok_json(inbox_json()))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/inboxes/i1"))
+        .respond_with(ok_json(
+            json!({ "object": "inbox", "id": "i1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let inbox = ms
+        .inboxes
+        .create(&CreateInboxOptions::default())
+        .await
+        .unwrap();
+    assert_eq!(inbox.email_address, "signup-bot-7f3k@acme.agents.example");
+    assert!(inbox.shared);
+    assert_eq!(inbox.quarantined, 1);
+    assert!(inbox.receiving_address.is_none());
+    let create = CreateInboxOptions {
+        email_address: Some("bot@acme.dev".into()),
+        name: Some("Bot".into()),
+        from_name: Some("Acme Bot".into()),
+        forwarding: Some(true),
+        kind: Some("human".into()),
+        expires_in: Some("7d".into()),
+        safety: Some(InboxSafetyUpdate {
+            accept_from: Some("allowlist".into()),
+            allowlist: Some(vec!["*@stripe.com".into()]),
+            send_cap: Some(None),
+            ..Default::default()
+        }),
+    };
+    ms.inboxes.create(&create).await.unwrap();
+    let options = ListInboxesOptions {
+        kind: Some("agent".into()),
+        limit: Some(2),
+        ..Default::default()
+    };
+    let list = ms.inboxes.list(Some(&options)).await.unwrap();
+    assert!(list.data[0].name.is_none());
+    assert_eq!(
+        ms.inboxes
+            .get("bot+sales@acme.dev")
+            .await
+            .unwrap()
+            .pending_approval,
+        1
+    );
+    let changes = UpdateInboxOptions {
+        name: Some("Renamed".into()),
+        from_name: Some(String::new()),
+        expires_in: Some(None),
+    };
+    ms.inboxes.update("i1", &changes).await.unwrap();
+    assert!(ms.inboxes.delete("i1").await.unwrap().deleted);
+}
+
+#[tokio::test]
+async fn inbox_safety_codes_and_quarantine() {
+    let server = MockServer::start().await;
+    let safety = json!({
+        "object": "inbox_safety", "inbox_id": "i1", "accept_from": "verified", "allowlist": [],
+        "owner_addresses": ["ops@acme.dev"], "screening": true, "extract_codes": true,
+        "send_policy": "reply_only", "require_approval": false, "private_codes": true,
+        "send_cap": null, "forward_to": []
+    });
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/safety"))
+        .respond_with(ok_json(safety.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/inboxes/i1/safety"))
+        .and(body_json(json!({
+            "allowlist": [], "send_policy": "allowlist", "require_approval": true, "send_cap": 25
+        })))
+        .respond_with(ok_json(safety))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/codes/latest"))
+        .and(query_param("from", "github.com"))
+        .and(query_param("wait", "20"))
+        .and(query_param("max_age", "600"))
+        .respond_with(ok_json(json!({
+            "object": "verification_code", "status": "found", "kind": "otp", "code": "482913",
+            "url": null, "link_domain_matches_sender": null, "email_id": "r1",
+            "from": "noreply@github.com", "received_at": "2026-10-12T10:00:00.000Z",
+            "sender_trust": "external"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/quarantine"))
+        .and(query_param("limit", "5"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "r1", "thread_id": "t1", "from": "x@y.dev", "subject": "Hi",
+                       "received_at": "2026-10-12T10:00:00.000Z", "quarantine_reason": "injection",
+                       "sender_trust": "external", "injection_score": 97, "phishing_score": null,
+                       "virus_signature": null }]
+        })))
+        .mount(&server)
+        .await;
+    let release = json!({
+        "object": "inbox_release", "inbox_id": "i1", "email_id": "r1",
+        "released_at": "2026-10-12T10:05:00.000Z", "trusted_sender": "x@y.dev"
+    });
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/quarantine/r1/release"))
+        .and(body_json(json!({})))
+        .respond_with(ok_json(release.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/quarantine/r2/release"))
+        .and(body_json(json!({ "trust_sender": true })))
+        .respond_with(ok_json(release))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let rules = ms.inboxes.safety().get("i1").await.unwrap();
+    assert_eq!(rules.send_cap, None);
+    assert_eq!(rules.owner_addresses, vec!["ops@acme.dev"]);
+    let changes = InboxSafetyUpdate {
+        allowlist: Some(vec![]),
+        send_policy: Some("allowlist".into()),
+        require_approval: Some(true),
+        send_cap: Some(Some(25)),
+        ..Default::default()
+    };
+    ms.inboxes.safety().update("i1", &changes).await.unwrap();
+
+    let options = LatestCodeOptions {
+        from: Some("github.com".into()),
+        wait: Some(20),
+        max_age: Some(600),
+    };
+    let code = ms
+        .inboxes
+        .codes()
+        .latest("i1", Some(&options))
+        .await
+        .unwrap();
+    assert_eq!(code.code.as_deref(), Some("482913"));
+    assert_eq!(code.sender_trust.as_deref(), Some("external"));
+
+    let list_options = ListOptions {
+        limit: Some(5),
+        ..Default::default()
+    };
+    let held = ms
+        .inboxes
+        .quarantine()
+        .list("i1", Some(&list_options))
+        .await
+        .unwrap();
+    assert_eq!(held.data[0].injection_score, Some(97));
+    let released = ms
+        .inboxes
+        .quarantine()
+        .release("i1", "r1", None)
+        .await
+        .unwrap();
+    assert_eq!(released.trusted_sender.as_deref(), Some("x@y.dev"));
+    let trust = ReleaseQuarantinedOptions {
+        trust_sender: Some(true),
+    };
+    ms.inboxes
+        .quarantine()
+        .release("i1", "r2", Some(&trust))
+        .await
+        .unwrap();
+}
+
+#[tokio::test]
+async fn inbox_labels_cover_list_create_update_delete() {
+    let server = MockServer::start().await;
+    let label = json!({ "object": "inbox_label", "id": "l1", "name": "Billing", "color": "#FFAA00",
+                        "created_at": "2026-10-12T10:00:00.000Z" });
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/labels"))
+        .respond_with(ok_json(json!({
+            "object": "list",
+            "data": [{ "id": "l1", "name": "Billing", "color": "#FFAA00",
+                       "created_at": "2026-10-12T10:00:00.000Z" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/labels"))
+        .and(body_json(json!({ "name": "Billing" })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(label.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/inboxes/i1/labels/l1"))
+        .and(body_json(json!({ "color": "#00AAFF" })))
+        .respond_with(ok_json(label))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/inboxes/i1/labels/l1"))
+        .respond_with(ok_json(
+            json!({ "object": "inbox_label", "id": "l1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let labels = ms.inboxes.labels().list("i1").await.unwrap();
+    assert!(!labels.has_more);
+    assert_eq!(labels.data[0].color, "#FFAA00");
+    let create = CreateInboxLabelOptions {
+        name: "Billing".into(),
+        color: None,
+    };
+    let created = ms.inboxes.labels().create("i1", &create).await.unwrap();
+    assert_eq!(created.object.as_deref(), Some("inbox_label"));
+    let changes = UpdateInboxLabelOptions {
+        color: Some("#00AAFF".into()),
+        ..Default::default()
+    };
+    ms.inboxes
+        .labels()
+        .update("i1", "l1", &changes)
+        .await
+        .unwrap();
+    assert!(
+        ms.inboxes
+            .labels()
+            .delete("i1", "l1")
+            .await
+            .unwrap()
+            .deleted
+    );
+}
+
+#[tokio::test]
+async fn inbox_threads_send_lists_as_csv() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/threads"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": true,
+            "data": [{ "id": "t1", "subject": "Invoice 42", "from": "Stripe <billing@stripe.com>",
+                       "to": ["bot@acme.dev"], "cc": [], "bcc": [],
+                       "labels": [{ "id": "l1", "name": "Billing", "color": "#FFAA00" }],
+                       "message_count": 2, "has_attachment": true, "has_draft": false, "read": true,
+                       "received_at": "2026-10-12T10:00:00.000Z", "folder": "quarantine" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/threads/search"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "t1", "subject": null, "from": null, "to": [], "cc": [], "bcc": [],
+                       "labels": [], "message_count": 1, "has_attachment": false, "has_draft": false,
+                       "read": false, "received_at": "2026-10-12T10:00:00.000Z", "folder": "sent",
+                       "matched_email_id": "m2", "highlights": { "subject": ["**Invoice** 42"] } }]
+        })))
+        .mount(&server)
+        .await;
+    let thread = json!({ "object": "inbox_thread", "id": "t1", "subject": null, "folder": "archive",
+                         "labels": [], "read": true, "quarantined": 0 });
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/threads/t1"))
+        .respond_with(ok_json(thread.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/inboxes/i1/threads/t1"))
+        .and(body_json(
+            json!({ "read": false, "folder": "archive", "label_id": "l1" }),
+        ))
+        .respond_with(ok_json(thread))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/inboxes/i1/threads/t1"))
+        .respond_with(ok_json(
+            json!({ "object": "inbox_thread", "id": "t1", "deleted": false }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let options = ListInboxThreadsOptions {
+        folders: Some(vec!["inbox".into(), "archive".into()]),
+        labels: Some(vec!["l1".into(), "l2".into()]),
+        read: Some(false),
+        include_quarantined: true,
+        limit: Some(20),
+        after: Some("t0".into()),
+        ..Default::default()
+    };
+    let list = ms
+        .inboxes
+        .threads()
+        .list("i1", Some(&options))
+        .await
+        .unwrap();
+    assert_eq!(list.data[0].folder, "quarantine"); // an enum value this SDK never saw still parses
+    assert_eq!(list.data[0].labels[0].name, "Billing");
+
+    let search = SearchInboxThreadsOptions {
+        query: Some("\"invoice 42\" -spam".into()),
+        from: Some(vec!["stripe.com".into(), "ada".into()]),
+        to: Some(vec!["bot@acme.dev".into()]),
+        has_attachment: Some(true),
+        start_date: Some("2026-10-01".into()),
+        end_date: Some("2026-10-12".into()),
+        folders: Some(vec!["sent".into()]),
+        ..Default::default()
+    };
+    let found = ms.inboxes.threads().search("i1", &search).await.unwrap();
+    assert_eq!(found.data[0].matched_email_id.as_deref(), Some("m2"));
+    assert_eq!(found.data[0].highlights["subject"], vec!["**Invoice** 42"]);
+
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(
+        requests[0].url.query(),
+        Some("limit=20&after=t0&folders=inbox%2Carchive&labels=l1%2Cl2&read=false&include_quarantined=true")
+    );
+    assert_eq!(
+        requests[1].url.query(),
+        Some("folders=sent&query=%22invoice%2042%22%20-spam&from=stripe.com%2Cada&to=bot%40acme.dev&has_attachment=true&start_date=2026-10-01&end_date=2026-10-12")
+    );
+
+    assert_eq!(
+        ms.inboxes.threads().get("i1", "t1").await.unwrap().folder,
+        "archive"
+    );
+    let changes = UpdateInboxThreadOptions {
+        read: Some(false),
+        folder: Some("archive".into()),
+        label_id: Some("l1".into()),
+    };
+    ms.inboxes
+        .threads()
+        .update("i1", "t1", &changes)
+        .await
+        .unwrap();
+    assert!(
+        !ms.inboxes
+            .threads()
+            .delete("i1", "t1")
+            .await
+            .unwrap()
+            .deleted
+    );
+}
+
+#[tokio::test]
+async fn inbox_thread_emails_list_get_reply_forward() {
+    let server = MockServer::start().await;
+    let inbound = json!({
+        "id": "m1", "direction": "inbound", "from": "Ada <ada@x.dev>", "to": ["bot@acme.dev"],
+        "cc": [], "bcc": [], "reply_to": [], "subject": "Hi", "message_id": "<a@x.dev>",
+        "html": null, "text": "Hello", "attachments": [{ "id": "a1", "filename": null, "size": null }],
+        "read": false, "received_at": "2026-10-12T10:00:00.000Z", "extracted_text": "Hello",
+        "spam_verdict": "pass", "virus_verdict": "pass",
+        "screening": { "verdict": "suspicious", "sender_trust": "unauthenticated",
+                       "quarantine_reason": null, "reasons": [], "injection_score": null,
+                       "phishing_score": null, "hidden_text_removed": false }
+    });
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/threads/t1/emails"))
+        .and(query_param("after", "m0"))
+        .respond_with(ok_json(
+            json!({ "object": "list", "has_more": false, "data": [inbound.clone()] }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/threads/t1/emails/m1"))
+        .respond_with(ok_json(inbound))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/threads/t1/emails/m1/reply"))
+        .and(header("idempotency-key", "tr-1"))
+        .and(body_json(json!({ "text": "Thanks", "reply_all": true })))
+        .respond_with(ok_json(json!({
+            "id": "m2", "direction": "outbound", "from": "Signup bot <bot@acme.dev>",
+            "to": ["ada@x.dev"], "cc": [], "bcc": [], "reply_to": [], "subject": "Re: Hi",
+            "message_id": null, "html": null, "text": "Thanks", "attachments": [], "read": true,
+            "received_at": "2026-10-12T10:01:00.000Z", "email_id": "m2", "thread_id": "t1",
+            "inbox_id": "i1", "status": "queued"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/threads/t1/emails/m1/forward"))
+        .and(body_json(json!({
+            "to": "ops@acme.dev", "subject": "Fwd: Hi", "requires_approval": true
+        })))
+        .respond_with(ResponseTemplate::new(202).set_body_json(draft_json("pending_approval")))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let emails = ms.inboxes.threads().emails();
+    let options = ListOptions {
+        after: Some("m0".into()),
+        ..Default::default()
+    };
+    let list = emails.list("i1", "t1", Some(&options)).await.unwrap();
+    assert_eq!(
+        list.data[0].screening.as_ref().unwrap().verdict,
+        "suspicious"
+    );
+    assert_eq!(list.data[0].attachments[0].size, None);
+    assert_eq!(
+        emails
+            .get("i1", "t1", "m1")
+            .await
+            .unwrap()
+            .extracted_text
+            .as_deref(),
+        Some("Hello")
+    );
+
+    let reply = ReplyInThreadOptions {
+        text: Some("Thanks".into()),
+        reply_all: Some(true),
+        ..Default::default()
+    };
+    let sent = sent_of(
+        emails
+            .reply("i1", "t1", "m1", reply.with_idempotency_key("tr-1"))
+            .await
+            .unwrap(),
+    );
+    assert_eq!(sent.email_id.as_deref(), Some("m2"));
+    assert_eq!(sent.status.as_deref(), Some("queued"));
+
+    let forward = ForwardInThreadOptions {
+        to: "ops@acme.dev".into(),
+        subject: Some("Fwd: Hi".into()),
+        requires_approval: Some(true),
+        ..Default::default()
+    };
+    let draft = draft_of(emails.forward("i1", "t1", "m1", &forward).await.unwrap());
+    assert_eq!(draft.id, "d1");
+}
+
+#[tokio::test]
+async fn inbox_drafts_cover_the_lifecycle() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/drafts"))
+        .and(query_param("limit", "3"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "d1", "type": "standalone", "to": null, "cc": [], "bcc": [],
+                       "subject": null, "snippet": "Hi Ada", "thread_id": null,
+                       "reply_to_email_id": null, "updated_at": "2026-10-12T10:00:00.000Z",
+                       "status": "draft", "approval_reasons": [] }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/drafts"))
+        .and(body_json(json!({
+            "to": ["ada@x.dev"], "subject": "Re: Hi", "text": "Thanks", "thread_id": "t1",
+            "reply_to_email_id": "m1"
+        })))
+        .respond_with(ResponseTemplate::new(201).set_body_json(draft_json("draft")))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/inboxes/i1/drafts/d1"))
+        .respond_with(ok_json(draft_json("pending_approval")))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/inboxes/i1/drafts/d1"))
+        .and(body_json(
+            json!({ "cc": null, "subject": null, "html": "<p>Thanks</p>" }),
+        ))
+        .respond_with(ok_json(draft_json("draft")))
+        .mount(&server)
+        .await;
+    Mock::given(method("DELETE"))
+        .and(path("/inboxes/i1/drafts/d1"))
+        .respond_with(ok_json(
+            json!({ "object": "inbox_draft", "id": "d1", "deleted": true }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/drafts/d1/reject"))
+        .respond_with(ok_json(draft_json("rejected")))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let drafts = ms.inboxes.drafts();
+    let options = ListOptions {
+        limit: Some(3),
+        ..Default::default()
+    };
+    let list = drafts.list("i1", Some(&options)).await.unwrap();
+    assert!(list.data[0].to.is_none());
+    assert_eq!(list.data[0].snippet.as_deref(), Some("Hi Ada"));
+    let create = CreateInboxDraftOptions {
+        to: Some(vec!["ada@x.dev"].into()),
+        subject: Some("Re: Hi".into()),
+        text: Some("Thanks".into()),
+        thread_id: Some("t1".into()),
+        reply_to_email_id: Some("m1".into()),
+        ..Default::default()
+    };
+    assert_eq!(drafts.create("i1", &create).await.unwrap().r#type, "reply");
+    let got = drafts.get("i1", "d1").await.unwrap();
+    assert_eq!(got.expires_at.as_deref(), Some("2026-10-19T10:00:00.000Z"));
+    let changes = UpdateInboxDraftOptions {
+        cc: Some(None),
+        subject: Some(None),
+        html: Some(Some("<p>Thanks</p>".into())),
+        ..Default::default()
+    };
+    drafts.update("i1", "d1", &changes).await.unwrap();
+    assert!(drafts.delete("i1", "d1").await.unwrap().deleted);
+    assert_eq!(drafts.reject("i1", "d1").await.unwrap().status, "rejected");
+}
+
+#[tokio::test]
+async fn inbox_draft_send_posts_no_body_and_reports_a_held_draft() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/drafts/d1/send"))
+        .and(header("idempotency-key", "ds-1"))
+        .respond_with(ok_json(json!({
+            "object": "inbox_draft", "id": "d1", "thread_id": "t1", "email_id": "e9"
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/drafts/d2/send"))
+        .respond_with(ResponseTemplate::new(202).set_body_json(draft_json("pending_approval")))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes/i1/drafts/d3/send"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "statusCode": 403, "name": "approval_required", "message": "A person must approve this draft"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let drafts = ms.inboxes.drafts();
+    let sent = sent_of(drafts.send("i1", "d1", Some("ds-1")).await.unwrap());
+    assert_eq!(
+        sent,
+        InboxDraftSent {
+            object: "inbox_draft".into(),
+            id: "d1".into(),
+            thread_id: Some("t1".into()),
+            email_id: Some("e9".into()),
+        }
+    );
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests[0].body.is_empty());
+    assert!(requests[0].headers.get("content-type").is_none());
+
+    let draft = draft_of(drafts.send("i1", "d2", None).await.unwrap());
+    assert_eq!(draft.status, "pending_approval");
+    let requests = server.received_requests().await.unwrap();
+    assert!(requests[1].headers.get("idempotency-key").is_none());
+
+    let err = drafts.send("i1", "d3", None).await.unwrap_err();
+    assert_eq!(err.name(), Some("approval_required"));
+    assert_eq!(err.status_code(), Some(403));
+}
+
+#[tokio::test]
+async fn inbox_fields_on_existing_resources() {
+    let server = MockServer::start().await;
+    Mock::given(method("PATCH"))
+        .and(path("/domains/d1"))
+        .and(body_json(json!({ "receiving_catch_all": true })))
+        .respond_with(ok_json(json!({
+            "object": "domain", "id": "d1", "name": "x.dev", "status": "verified",
+            "created_at": "2026-01-01T00:00:00Z", "region": "us-east-1",
+            "open_tracking": false, "click_tracking": false, "tracking_subdomain": null,
+            "capabilities": { "sending": "enabled", "receiving": "enabled" },
+            "receiving_catch_all": true
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/api-keys"))
+        .and(body_json(
+            json!({ "name": "agent", "permission": "full_access", "inbox_id": "i1" }),
+        ))
+        .respond_with(ok_json(json!({ "id": "k1", "token": "ms_x" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/api-keys"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [{ "id": "k1", "name": "agent", "created_at": "2026-10-12T10:00:00.000Z",
+                       "last_used_at": null, "inbox_id": "i1" }]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("POST"))
+        .and(path("/webhooks"))
+        .and(body_json(json!({
+            "endpoint": "https://x.dev/h", "events": ["email.received", "inbox.email.received"],
+            "inbox_ids": ["i1"]
+        })))
+        .respond_with(ok_json(
+            json!({ "object": "webhook", "id": "w1", "signing_secret": "whsec_x" }),
+        ))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/webhooks/w1"))
+        .and(body_json(json!({ "inbox_ids": null })))
+        .respond_with(ok_json(json!({ "object": "webhook", "id": "w1" })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/webhooks/w1"))
+        .respond_with(ok_json(json!({
+            "object": "webhook", "id": "w1", "endpoint": "https://x.dev/h",
+            "created_at": "2026-10-12T10:00:00.000Z", "status": "enabled",
+            "events": ["inbox.email.received"], "inbox_ids": ["i1"]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/usage"))
+        .respond_with(ok_json(json!({
+            "object": "usage", "cloud": true, "plan": "starter",
+            "limits": { "emails_per_day": null, "domains": null, "inboxes": 25 },
+            "today": { "emails_sent": 0, "resets_at": "2026-10-13T00:00:00Z" },
+            "team": { "id": "tm1", "name": "Acme" }, "app_url": null
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let changes = UpdateDomainOptions {
+        receiving_catch_all: Some(true),
+        ..Default::default()
+    };
+    assert!(
+        ms.domains
+            .update("d1", &changes)
+            .await
+            .unwrap()
+            .receiving_catch_all
+    );
+    ms.api_keys
+        .create(&CreateApiKeyOptions {
+            name: "agent".into(),
+            permission: Some(ApiKeyPermission::FullAccess),
+            inbox_id: Some("i1".into()),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let keys = ms.api_keys.list(None).await.unwrap();
+    assert_eq!(keys.data[0].inbox_id.as_deref(), Some("i1"));
+    ms.webhooks
+        .create(&CreateWebhookOptions {
+            endpoint: "https://x.dev/h".into(),
+            events: vec!["email.received".into(), "inbox.email.received".into()],
+            inbox_ids: Some(vec!["i1".into()]),
+            ..Default::default()
+        })
+        .await
+        .unwrap();
+    let every_inbox = UpdateWebhookOptions {
+        inbox_ids: Some(None),
+        ..Default::default()
+    };
+    ms.webhooks.update("w1", &every_inbox).await.unwrap();
+    assert_eq!(
+        ms.webhooks.get("w1").await.unwrap().inbox_ids,
+        Some(vec!["i1".to_string()])
+    );
+    assert_eq!(ms.usage.get().await.unwrap().limits.inboxes, Some(25));
 }

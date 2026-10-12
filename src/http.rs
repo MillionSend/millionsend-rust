@@ -5,6 +5,7 @@ use std::fmt::Write as _;
 use std::time::Duration;
 
 use crate::error::{ApiError, Error, Result};
+use crate::types::SendOutcome;
 
 const SDK_VERSION: &str = env!("CARGO_PKG_VERSION");
 const CONNECT_TIMEOUT: Duration = Duration::from_secs(10);
@@ -106,6 +107,47 @@ impl Config {
         self.run(self.client.get(url)).await
     }
 
+    /// GET the server may hold open for `wait` seconds (a long-poll): the
+    /// request timeout grows by the wait so it can run its course.
+    pub(crate) async fn get_wait<T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        query: &[(&'static str, String)],
+        wait: Option<u32>,
+    ) -> Result<T> {
+        let mut req = self.client.get(self.url_with_query(segments, query));
+        if let Some(wait) = wait.filter(|&wait| wait > 0) {
+            req = req.timeout(REQUEST_TIMEOUT + Duration::from_secs(wait.into()));
+        }
+        self.run(req).await
+    }
+
+    /// POST answering 200 with a `T` once the email went out, or 202 with the
+    /// draft an inbox's rules held for approval. `None` sends no body.
+    pub(crate) async fn post_outcome<B: Serialize + ?Sized, T: DeserializeOwned>(
+        &self,
+        segments: &[&str],
+        body: Option<&B>,
+        idempotency_key: Option<&str>,
+    ) -> Result<SendOutcome<T>> {
+        let mut req = self.client.post(self.url(segments));
+        if let Some(body) = body {
+            req = req.json(body);
+        }
+        if let Some(key) = idempotency_key {
+            req = req.header("Idempotency-Key", key);
+        }
+        self.run_with(req, |status, body| {
+            if status == 202 {
+                serde_json::from_slice(body).map(|draft| SendOutcome::Draft(Box::new(draft)))
+            } else {
+                serde_json::from_slice(body).map(SendOutcome::Sent)
+            }
+            .map_err(Error::Parse)
+        })
+        .await
+    }
+
     pub(crate) async fn post<B: Serialize + ?Sized, T: DeserializeOwned>(
         &self,
         segments: &[&str],
@@ -162,6 +204,19 @@ impl Config {
     }
 
     async fn run<T: DeserializeOwned>(&self, req: RequestBuilder) -> Result<T> {
+        self.run_with(req, |_, body| {
+            serde_json::from_slice(body).map_err(Error::Parse)
+        })
+        .await
+    }
+
+    /// Sends `req` and hands a 2xx status and body to `decode`; anything else
+    /// becomes an [`Error::Api`].
+    async fn run_with<T>(
+        &self,
+        req: RequestBuilder,
+        decode: impl FnOnce(u16, &[u8]) -> Result<T>,
+    ) -> Result<T> {
         // The API key travels as a bearer header, so plain http is loopback-only by default.
         if !self.allow_insecure_http && is_insecure_http_url(&self.base_url) {
             return Err(Error::Api(ApiError {
@@ -185,7 +240,7 @@ impl Config {
         let body = response.bytes().await.map_err(Error::Http)?;
 
         if status.is_success() {
-            serde_json::from_slice(&body).map_err(Error::Parse)
+            decode(status.as_u16(), &body)
         } else {
             Err(Error::Api(ApiError::parse(status.as_u16(), &body)))
         }
