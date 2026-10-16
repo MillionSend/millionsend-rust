@@ -128,6 +128,19 @@ pub struct BatchError {
     pub message: String,
 }
 
+/// A per-item failure from a permissive contacts batch, with the status and
+/// name strict mode would have answered for the item (both `None` on servers
+/// before v0.12.0).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BatchContactError {
+    pub index: u32,
+    #[serde(default, rename = "statusCode")]
+    pub status_code: Option<u16>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub message: String,
+}
+
 /// `{ object, id, deleted: true }` — the envelope every `delete` returns.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Deleted {
@@ -143,7 +156,11 @@ pub struct Deleted {
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {
     pub limit: Option<u32>,
+    /// The last id of a page: the next page, toward older items on the
+    /// newest-first lists.
     pub after: Option<String>,
+    /// The first id of a page: the previous page, toward newer items on the
+    /// newest-first lists.
     pub before: Option<String>,
 }
 
@@ -167,11 +184,13 @@ pub(crate) fn list_query(options: Option<&ListOptions>) -> Vec<(&'static str, St
     options.map(ListOptions::to_query).unwrap_or_default()
 }
 
-/// The `{ object: "list", data, has_more }` envelope every paginated list returns.
+/// The `{ object: "list", data, has_more }` envelope every paginated list
+/// returns; unpaginated lists (inbox labels) omit `has_more`.
 #[derive(Debug, Clone, Deserialize)]
 pub struct List<T> {
     pub object: String,
     pub data: Vec<T>,
+    #[serde(default)]
     pub has_more: bool,
 }
 
@@ -181,8 +200,13 @@ pub struct List<T> {
 /// struct literal with `..Default::default()`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SendEmailOptions {
+    /// An address on a verified domain, or an inbox's exact address on the
+    /// shared domain (`sending_mode: open` only).
     pub from: String,
+    /// An address here or in `cc`/`bcc` on a domain that can never receive
+    /// mail (`example.com`, `.test`, `.invalid`, …) answers 422.
     pub to: Recipients,
+    /// Up to 998 characters.
     pub subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
@@ -445,7 +469,7 @@ pub struct BatchContactsResponse {
     pub counts: BatchContactsCounts,
     /// Permissive mode only: the failed items by request index.
     #[serde(default)]
-    pub errors: Vec<BatchError>,
+    pub errors: Vec<BatchContactError>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -893,7 +917,10 @@ pub struct CreateBroadcastOptions {
     /// Neither `segment_id` nor `topic_id` set = send to all contacts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<String>,
+    /// Never the shared domain: sending from it answers 403
+    /// `inbox_send_policy`.
     pub from: String,
+    /// Up to 998 characters.
     pub subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
@@ -1204,8 +1231,10 @@ impl CreateDomainOptions {
 }
 
 /// `tracking_subdomain`: `Some(Some(label))` sets, `Some(None)` clears (sends
-/// `null`), `None` leaves it. `tls`/`capabilities` are passed through so the
-/// API, not the SDK, decides whether they are supported (422 while not).
+/// `null`), `None` leaves it. `receiving_catch_all` keeps mail to addresses
+/// without an inbox instead of refusing it (turning it on needs a paid plan on
+/// MillionSend Cloud). `tls`/`capabilities` are passed through so the API, not
+/// the SDK, decides whether they are supported (422 while not).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateDomainOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1214,6 +1243,8 @@ pub struct UpdateDomainOptions {
     pub click_tracking: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tracking_subdomain: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub receiving_catch_all: Option<bool>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tls: Option<serde_json::Value>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1233,6 +1264,22 @@ pub struct Domain {
     pub click_tracking: bool,
     pub tracking_subdomain: Option<String>,
     pub capabilities: DomainCapabilities,
+    #[serde(default)]
+    pub receiving_catch_all: bool,
+    /// The team's read-only subdomain of the shared inbox domain, the last row
+    /// of `list`; it sends only from its inboxes' own addresses. `false` on
+    /// servers before v0.14.0.
+    #[serde(default)]
+    pub shared: bool,
+    /// Shared row only: what its inboxes may send. `open` starts
+    /// conversations, `reply_only` replies inside threads, `receive_only`
+    /// sends nothing.
+    #[serde(default)]
+    pub sending_mode: Option<String>,
+    /// Shared row only: what holds sending below `open`, `plan` or `instance`;
+    /// `None` under `open`.
+    #[serde(default)]
+    pub sending_mode_reason: Option<String>,
     /// DNS records to publish; absent on `list`.
     #[serde(default)]
     pub records: Vec<DomainRecord>,
@@ -1270,7 +1317,9 @@ pub enum ApiKeyPermission {
 }
 
 /// `permission` defaults to `full_access`; `domain_id` restricts a
-/// `sending_access` key to one domain.
+/// `sending_access` key to one of the team's own domains (the `shared: true`
+/// row of `domains.list` answers 422); `inbox_id` makes a `full_access` key
+/// that reads and sends for that one inbox (at most 5 per inbox).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateApiKeyOptions {
     pub name: String,
@@ -1278,6 +1327,8 @@ pub struct CreateApiKeyOptions {
     pub permission: Option<ApiKeyPermission>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub domain_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_id: Option<String>,
 }
 
 impl CreateApiKeyOptions {
@@ -1302,6 +1353,9 @@ pub struct ApiKey {
     pub name: String,
     pub created_at: String,
     pub last_used_at: Option<String>,
+    /// Set for a key restricted to one inbox.
+    #[serde(default)]
+    pub inbox_id: Option<String>,
 }
 
 pub type DeleteApiKeyResponse = Deleted;
@@ -1318,12 +1372,15 @@ pub enum WebhookStatus {
 /// `events` are wire names (`email.delivered`, `deliverability.paused`, …),
 /// kept as strings because the catalog grows. `signing_secret` is optional:
 /// omit it to have one minted; pass `whsec_…` to reuse an existing one.
+/// `inbox_ids` limits inbox events and `email.received` to those inboxes.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateWebhookOptions {
     pub endpoint: String,
     pub events: Vec<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub signing_secret: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1333,6 +1390,8 @@ pub struct CreateWebhookResponse {
     pub signing_secret: String,
 }
 
+/// `inbox_ids`: `Some(Some(ids))` limits inbox events to those inboxes,
+/// `Some(None)` sends `null` (every inbox), `None` leaves it.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateWebhookOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1341,6 +1400,8 @@ pub struct UpdateWebhookOptions {
     pub events: Option<Vec<String>>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub status: Option<WebhookStatus>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_ids: Option<Option<Vec<String>>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1357,6 +1418,9 @@ pub struct Webhook {
     /// signs deliveries alongside the current one.
     #[serde(default)]
     pub previous_secret_expires_at: Option<String>,
+    /// `None` when the endpoint takes events of every inbox.
+    #[serde(default)]
+    pub inbox_ids: Option<Vec<String>>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1504,6 +1568,8 @@ pub struct UsageReport {
 pub struct UsageLimits {
     pub emails_per_day: Option<u64>,
     pub domains: Option<u64>,
+    #[serde(default)]
+    pub inboxes: Option<u64>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -1518,4 +1584,922 @@ pub struct UsageToday {
 pub struct UsageTeam {
     pub id: String,
     pub name: String,
+}
+
+// ---- shared by receiving and inboxes -------------------------------------
+
+/// The set pairs of a query, in order.
+fn present<const N: usize>(
+    pairs: [(&'static str, Option<String>); N],
+) -> impl Iterator<Item = (&'static str, String)> {
+    pairs
+        .into_iter()
+        .filter_map(|(key, value)| value.map(|v| (key, v)))
+}
+
+/// A list query value: comma-joined, since the inbox endpoints read CSV and
+/// answer 422 to a repeated param. `None` for no items.
+fn csv(values: &Option<Vec<String>>) -> Option<String> {
+    values
+        .as_ref()
+        .filter(|values| !values.is_empty())
+        .map(|values| values.join(","))
+}
+
+fn flag(on: bool) -> Option<String> {
+    on.then(|| "true".to_string())
+}
+
+/// The outcome of a reply, a forward or a draft send.
+#[derive(Debug, Clone)]
+pub enum SendOutcome<T> {
+    /// HTTP 200: the email went out.
+    Sent(T),
+    /// HTTP 202: the inbox's rules held it as a draft for a person to approve;
+    /// its `approval_reasons` say why.
+    Draft(Box<InboxDraft>),
+}
+
+/// How an inbox screened a message. Lists carry `verdict` and
+/// `sender_trust`; message reads carry every field.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Screening {
+    /// `pending` | `clean` | `suspicious` | `quarantined` | `released`.
+    pub verdict: String,
+    /// `owner` | `allowlisted` | `known_thread` | `external` |
+    /// `unauthenticated` | `failed`.
+    pub sender_trust: String,
+    /// Set when quarantined or released.
+    pub quarantine_reason: Option<String>,
+    pub reasons: Vec<String>,
+    /// 0–100; `None` when not judged.
+    pub injection_score: Option<u32>,
+    pub phishing_score: Option<u32>,
+    pub hidden_text_removed: bool,
+}
+
+// ---- receiving -----------------------------------------------------------
+
+/// Filters and paginates `receiving.list` (newest first). `wait` (up to 50
+/// seconds) long-polls for mail newer than `before` or `since` (default: a
+/// minute before the call) and answers an empty page when nothing arrives.
+/// An `inbox_id` that doesn't exist answers 404 `not_found` at once, even with
+/// `wait`. `from` is an address, or a domain covering its subdomains; `unread`
+/// needs `inbox_id`, except with an inbox-scoped key, which reads its own
+/// inbox; `include_quarantined` (full-access keys) also lists held mail,
+/// `quarantined` lists held mail only.
+#[derive(Debug, Clone, Default)]
+pub struct ListReceivedEmailsOptions {
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+    pub wait: Option<u32>,
+    /// ISO 8601 with `Z` or an offset; without one the API answers 422.
+    pub since: Option<String>,
+    pub inbox_id: Option<String>,
+    /// An address the message was delivered to.
+    pub to: Option<String>,
+    pub from: Option<String>,
+    pub subject_contains: Option<String>,
+    pub unread: Option<bool>,
+    pub include_quarantined: bool,
+    pub quarantined: bool,
+}
+
+impl ListReceivedEmailsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        query.extend(present([
+            ("wait", self.wait.map(|w| w.to_string())),
+            ("since", self.since.clone()),
+            ("inbox_id", self.inbox_id.clone()),
+            ("to", self.to.clone()),
+            ("from", self.from.clone()),
+            ("subject_contains", self.subject_contains.clone()),
+            ("unread", self.unread.map(|u| u.to_string())),
+            ("include_quarantined", flag(self.include_quarantined)),
+            ("quarantined", flag(self.quarantined)),
+        ]));
+        query
+    }
+}
+
+/// `html_format`: `data_uri` (default; images referenced by `cid:` inlined)
+/// or `cid` (references kept; the parts are in `attachments`).
+#[derive(Debug, Clone, Default)]
+pub struct GetReceivedEmailOptions {
+    pub html_format: Option<String>,
+}
+
+/// A message one of the team's domains received: a row of `receiving.list`,
+/// or the full record of `receiving.get`, which adds `object`, `html`,
+/// `html_format`, `text`, `headers`, `authentication`, `raw`,
+/// `extracted_text`, `spam_score` and `virus_signature`. Verdicts and tiers
+/// are plain strings, so values this SDK version has never seen deserialize.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmail {
+    pub object: Option<String>,
+    pub id: String,
+    /// Bare address; the display name is in `headers["from"]`.
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub reply_to: Vec<String>,
+    /// The team's envelope recipients.
+    pub received_for: Vec<String>,
+    pub subject: String,
+    pub message_id: String,
+    pub created_at: String,
+    pub attachments: Vec<ReceivedAttachment>,
+    pub html: Option<String>,
+    pub html_format: Option<String>,
+    /// Invisible characters removed.
+    pub text: Option<String>,
+    pub headers: Option<HashMap<String, String>>,
+    pub authentication: Option<ReceivedEmailAuthentication>,
+    /// The original RFC 822 message; `None` once retention removed the
+    /// content, and for a message carrying malware.
+    pub raw: Option<ReceivedEmailRaw>,
+    /// The visible reply, hidden text removed.
+    pub extracted_text: Option<String>,
+    pub spam_score: Option<u32>,
+    pub virus_signature: Option<String>,
+    /// The calling key's inbox, else the message's first; `None` for
+    /// catch-all mail.
+    pub inbox_id: Option<String>,
+    pub thread_id: Option<String>,
+    /// Full-access views only.
+    pub inboxes: Option<Vec<ReceivedEmailInbox>>,
+    pub screening: Option<Screening>,
+    /// `pass` | `gray` | `fail`; `None` when not computed.
+    pub spam_verdict: Option<String>,
+    /// `pass` | `fail` | `processing_failed`; `None` when not scanned.
+    pub virus_verdict: Option<String>,
+    pub extracted: Option<ReceivedEmailExtracted>,
+    /// Set with an inbox context.
+    pub read: Option<bool>,
+}
+
+/// A file of a received or inbox message. Message reads leave `download_url`
+/// unset; `receiving.attachments()` adds a signed `download_url`, valid for an
+/// hour without an API key, and its `expires_at`. On mail an inbox sent, `id`
+/// is the attachment's position (`"0"`, `"1"`…).
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ReceivedAttachment {
+    pub object: Option<String>,
+    pub id: String,
+    pub filename: Option<String>,
+    pub content_type: Option<String>,
+    pub content_disposition: Option<String>,
+    pub content_id: Option<String>,
+    pub size: Option<u64>,
+    pub download_url: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// SPF, DKIM and DMARC results checked on arrival: `pass`, `fail`, `gray`,
+/// `processing_failed` or `unknown`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmailAuthentication {
+    pub spf: String,
+    pub dkim: String,
+    pub dmarc: String,
+}
+
+/// A signed link to the original message, valid for an hour.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmailRaw {
+    pub download_url: String,
+    pub expires_at: String,
+}
+
+/// One inbox a received email went to.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmailInbox {
+    pub inbox_id: String,
+    pub thread_id: String,
+    pub verdict: String,
+}
+
+/// What verification mail yields. Lists carry `kinds` (`code`, `link`);
+/// `receiving.get` adds the `code` or the sign-in `link`, which are never
+/// served from held mail.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmailExtracted {
+    pub kinds: Vec<String>,
+    pub code: Option<String>,
+    pub link: Option<String>,
+    pub link_domain_matches_sender: Option<bool>,
+    pub ambiguous: Option<bool>,
+}
+
+/// A page of `receiving.list`. On a long-poll, `held` lists the matches held
+/// for screening or in quarantine since the cursor, ids only.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmailList {
+    pub object: String,
+    pub data: Vec<ReceivedEmail>,
+    pub has_more: bool,
+    pub held: Vec<HeldEmail>,
+}
+
+/// A long-poll match an inbox held back. `reason` is `pending` (still being
+/// screened) or `quarantined`; `quarantine_reason` says why, unset while
+/// pending. `inbox_id` is unset for a catch-all copy held for a virus.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct HeldEmail {
+    pub id: String,
+    pub inbox_id: Option<String>,
+    pub reason: Option<String>,
+    pub quarantine_reason: Option<String>,
+    pub created_at: String,
+}
+
+/// `text` and/or `html`, plus optional `subject` (default `Re: ` and the
+/// original's), `cc`, `bcc`, `reply_all`, `requires_approval`, `from` (a
+/// verified team address; default the inbox's) and `inbox_id` (which of the
+/// message's inboxes replies).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReplyReceivedEmailOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_all: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_approval: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_id: Option<String>,
+}
+
+/// `text` or `html` is a note above the quoted original. `mode`: `inline`
+/// (default) or `attachment`, which sends the original as
+/// `forwarded_message.eml`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ForwardReceivedEmailOptions {
+    pub to: Recipients,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_approval: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub inbox_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub mode: Option<String>,
+}
+
+impl IdempotentTrait for &ReplyReceivedEmailOptions {}
+impl IdempotentTrait for &ForwardReceivedEmailOptions {}
+
+/// The email a `receiving.reply` or `forward` sent.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct ReceivedEmailSent {
+    pub object: String,
+    pub id: String,
+    pub thread_id: Option<String>,
+    pub inbox_id: Option<String>,
+}
+
+// ---- inboxes -------------------------------------------------------------
+
+/// An address whose mail lands in threads, as returned by `create`, `get` and
+/// `update`, and as a `list` row (rows carry no `object`, `domain_id`,
+/// `receiving_address`, `drafts`, `created_at`, `quarantined` or
+/// `pending_approval`).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct Inbox {
+    pub object: Option<String>,
+    pub id: String,
+    pub name: Option<String>,
+    /// Lowercase; fixed at creation.
+    pub email_address: String,
+    /// The custom domain, or the team's subdomain of the shared inbox domain:
+    /// the `shared: true` row of `domains.list`.
+    pub domain_id: Option<String>,
+    /// Set for forwarding inboxes.
+    pub receiving_address: Option<String>,
+    pub from_name: Option<String>,
+    /// Threads with unread mail.
+    pub unread: u64,
+    /// Unsent drafts.
+    pub drafts: u64,
+    pub last_received: Option<String>,
+    pub created_at: Option<String>,
+    /// `agent` | `human`.
+    pub kind: String,
+    pub shared: bool,
+    /// `None` when it never expires.
+    pub expires_at: Option<String>,
+    /// Held messages not yet released.
+    pub quarantined: u64,
+    pub pending_approval: u64,
+}
+
+/// Every field optional. Without `email_address` or `domain_id` the inbox gets
+/// an address on the shared inbox domain: `username`, or a random one. `kind`
+/// is `agent` (the default: screening, code extraction and send rules on) or
+/// `human`. `expires_in` runs from `1h` to `365d`; omitted, the inbox never
+/// expires, though a shared-domain inbox unused for 90 days is deleted either
+/// way. `safety` sets any of the rules.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateInboxOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub email_address: Option<String>,
+    /// Instead of `email_address`, the id of a `domains.list` row: the
+    /// `shared: true` row works like leaving both out; one of the team's own
+    /// domains needs `username`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_id: Option<String>,
+    /// The part before the @, required with the `domain_id` of one of the
+    /// team's own domains. On the shared domain it is optional (random when
+    /// omitted) and takes 1–64 of `a-z 0-9 . _ -`, starting and ending with a
+    /// letter or digit; reserved names and brand look-alikes answer 422. An
+    /// address in use answers 409.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// 1–320 characters.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    /// Reviewed on the shared domain, like `username`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forwarding: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub kind: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub safety: Option<InboxSafetyUpdate>,
+}
+
+/// `name` takes 1–320 characters. `from_name: Some(String::new())` removes the
+/// display name; a new one on the shared domain is reviewed. `expires_in`:
+/// `Some(Some("7d"))` sets a lifetime from now (`1h` to `365d`), `Some(None)`
+/// sends `null` (never expires), `None` leaves it.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateInboxOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub from_name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub expires_in: Option<Option<String>>,
+}
+
+/// [`ListOptions`] plus a `kind` filter (`agent` | `human`).
+#[derive(Debug, Clone, Default)]
+pub struct ListInboxesOptions {
+    pub kind: Option<String>,
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+}
+
+impl ListInboxesOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        query.extend(present([("kind", self.kind.clone())]));
+        query
+    }
+}
+
+/// An inbox's rules: who may write in and what an agent may send.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxSafety {
+    pub object: Option<String>,
+    pub inbox_id: Option<String>,
+    /// `anyone` | `verified` | `allowlist`.
+    pub accept_from: String,
+    /// `local@domain` or `*@domain`.
+    pub allowlist: Vec<String>,
+    /// Ignored on the shared domain: they don't make senders trusted there.
+    pub owner_addresses: Vec<String>,
+    pub screening: bool,
+    pub extract_codes: bool,
+    /// `reply_only` | `allowlist` | `open`.
+    pub send_policy: String,
+    pub require_approval: bool,
+    pub private_codes: bool,
+    /// Recipients per UTC day; `None`: no inbox cap.
+    pub send_cap: Option<u32>,
+    /// On the shared domain, team members' sign-in addresses only.
+    pub forward_to: Vec<String>,
+}
+
+/// A partial set of rules for `inboxes.safety().update` and
+/// [`CreateInboxOptions::safety`]; `None` fields are left unchanged.
+/// `send_cap: Some(None)` sends `null`: no daily cap. On the shared domain
+/// `send_policy: "allowlist"` answers 422, and so does `"open"` unless the
+/// shared row's `sending_mode` is `open`.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct InboxSafetyUpdate {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub accept_from: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub allowlist: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub owner_addresses: Option<Vec<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub screening: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub extract_codes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_policy: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub require_approval: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub private_codes: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub send_cap: Option<Option<u32>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub forward_to: Option<Vec<String>>,
+}
+
+/// The answer of `inboxes.codes().latest`. `status` is `found`, `none`,
+/// `ambiguous` or `timeout`; a found `kind` is `otp` (`code`) or `link` (`url`,
+/// never fetched by the server).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct VerificationCode {
+    pub object: String,
+    pub status: String,
+    pub kind: Option<String>,
+    pub code: Option<String>,
+    pub url: Option<String>,
+    pub link_domain_matches_sender: Option<bool>,
+    pub email_id: Option<String>,
+    pub from: Option<String>,
+    pub received_at: Option<String>,
+    pub sender_trust: Option<String>,
+}
+
+/// `from` is an address, or a domain covering its subdomains. `wait` (up to 50
+/// seconds) long-polls for a new code. `max_age` (60–86400 seconds, server
+/// default 600) bounds how long ago the email was delivered, or released from
+/// quarantine.
+#[derive(Debug, Clone, Default)]
+pub struct LatestCodeOptions {
+    pub from: Option<String>,
+    pub wait: Option<u32>,
+    pub max_age: Option<u32>,
+    /// ISO 8601 with `Z` or an offset: only mail received after it. Pass the
+    /// previous code's `received_at` so a second sign-in waits for its own
+    /// code.
+    pub since: Option<String>,
+}
+
+impl LatestCodeOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        present([
+            ("from", self.from.clone()),
+            ("wait", self.wait.map(|w| w.to_string())),
+            ("max_age", self.max_age.map(|m| m.to_string())),
+            ("since", self.since.clone()),
+        ])
+        .collect()
+    }
+}
+
+/// A held message in `inboxes.quarantine().list`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuarantinedEmail {
+    pub id: String,
+    pub thread_id: Option<String>,
+    pub from: String,
+    pub subject: Option<String>,
+    pub received_at: String,
+    pub quarantine_reason: String,
+    pub sender_trust: String,
+    pub injection_score: Option<u32>,
+    pub phishing_score: Option<u32>,
+    pub virus_signature: Option<String>,
+}
+
+/// `trust_sender` also adds the sender to the inbox's allowlist. Serializes
+/// as `{}` when unset.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReleaseQuarantinedOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub trust_sender: Option<bool>,
+}
+
+/// Returned by `inboxes.quarantine().release`. `trusted_sender` is the
+/// address added to the allowlist.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct QuarantineRelease {
+    pub object: String,
+    pub inbox_id: String,
+    pub email_id: String,
+    pub released_at: String,
+    pub trusted_sender: Option<String>,
+}
+
+/// A label of one inbox; on a thread it carries no `object` or `created_at`.
+/// `color` is `#RRGGBB`, uppercase.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct InboxLabel {
+    pub object: Option<String>,
+    pub id: String,
+    pub name: String,
+    pub color: String,
+    pub created_at: Option<String>,
+}
+
+/// `color` (`#RRGGBB`) is random when omitted.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateInboxLabelOptions {
+    pub name: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateInboxLabelOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub name: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub color: Option<String>,
+}
+
+/// A conversation, as returned by `threads().get` and `update`.
+/// `quarantined` counts held messages and is 0 for inbox-scoped keys.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxThread {
+    pub object: String,
+    pub id: String,
+    pub subject: Option<String>,
+    /// `inbox` | `archive` | `spam` | `sent` | `trash`.
+    pub folder: String,
+    pub labels: Vec<InboxLabel>,
+    pub read: bool,
+    pub quarantined: u64,
+}
+
+/// A row of `threads().list` and `search`. `from` is the latest inbound
+/// sender (`Name <address>`); `to`, `cc` and `bcc` are the latest message's;
+/// `received_at` is the last activity. `matched_email_id` and `highlights`
+/// (matched fragments marked `**like this**`) come with `search` only.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxThreadListItem {
+    pub id: String,
+    pub subject: Option<String>,
+    pub from: Option<String>,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub labels: Vec<InboxLabel>,
+    pub message_count: u64,
+    pub has_attachment: bool,
+    pub has_draft: bool,
+    pub read: bool,
+    /// With `include_quarantined`, in owner views: messages in quarantine not
+    /// yet released.
+    pub quarantined: Option<u64>,
+    pub received_at: String,
+    pub folder: String,
+    pub matched_email_id: Option<String>,
+    pub highlights: HashMap<String, Vec<String>>,
+}
+
+/// Filters `threads().list` (most recently active first). `folders` defaults
+/// to `inbox` (`inbox`, `archive` and `sent` with `labels`); `labels` matches
+/// any of the label ids; `include_quarantined` also counts held mail
+/// (full-access keys).
+#[derive(Debug, Clone, Default)]
+pub struct ListInboxThreadsOptions {
+    pub folders: Option<Vec<String>>,
+    pub labels: Option<Vec<String>>,
+    pub read: Option<bool>,
+    pub include_quarantined: bool,
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+}
+
+impl ListInboxThreadsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        query.extend(present([
+            ("folders", csv(&self.folders)),
+            ("labels", csv(&self.labels)),
+            ("read", self.read.map(|r| r.to_string())),
+            ("include_quarantined", flag(self.include_quarantined)),
+        ]));
+        query
+    }
+}
+
+/// Filters `threads().search`: the list filters plus `query` (every word must
+/// match; `"exact phrase"` and `-word` work), `from`, `to`, `cc` and `bcc`
+/// (substrings of an address or name, any-match), `has_attachment` and a
+/// `start_date`/`end_date` range (`YYYY-MM-DD` or ISO 8601). It searches
+/// subjects, senders and recipients.
+#[derive(Debug, Clone, Default)]
+pub struct SearchInboxThreadsOptions {
+    pub query: Option<String>,
+    pub from: Option<Vec<String>>,
+    pub to: Option<Vec<String>>,
+    pub cc: Option<Vec<String>>,
+    pub bcc: Option<Vec<String>>,
+    pub has_attachment: Option<bool>,
+    pub start_date: Option<String>,
+    pub end_date: Option<String>,
+    pub folders: Option<Vec<String>>,
+    pub labels: Option<Vec<String>>,
+    pub read: Option<bool>,
+    pub include_quarantined: bool,
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+}
+
+impl SearchInboxThreadsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListInboxThreadsOptions {
+            folders: self.folders.clone(),
+            labels: self.labels.clone(),
+            read: self.read,
+            include_quarantined: self.include_quarantined,
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        query.extend(present([
+            ("query", self.query.clone()),
+            ("from", csv(&self.from)),
+            ("to", csv(&self.to)),
+            ("cc", csv(&self.cc)),
+            ("bcc", csv(&self.bcc)),
+            ("has_attachment", self.has_attachment.map(|h| h.to_string())),
+            ("start_date", self.start_date.clone()),
+            ("end_date", self.end_date.clone()),
+        ]));
+        query
+    }
+}
+
+/// `read` marks every message; `folder` moves the thread (`inbox`, `archive`,
+/// `spam` or `trash`); `label_id` applies a label.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateInboxThreadOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub read: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub folder: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub label_id: Option<String>,
+}
+
+/// Paginates `threads().emails().list` (oldest first; `after` pages toward
+/// newer). `include_quarantined` also lists held messages (full-access keys
+/// not scoped to an inbox).
+#[derive(Debug, Clone, Default)]
+pub struct ListInboxThreadEmailsOptions {
+    pub include_quarantined: bool,
+    pub limit: Option<u32>,
+    pub after: Option<String>,
+    pub before: Option<String>,
+}
+
+impl ListInboxThreadEmailsOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        let mut query = ListOptions {
+            limit: self.limit,
+            after: self.after.clone(),
+            before: self.before.clone(),
+        }
+        .to_query();
+        query.extend(present([(
+            "include_quarantined",
+            flag(self.include_quarantined),
+        )]));
+        query
+    }
+}
+
+/// `include_quarantined` reads a held message (full-access keys not scoped to
+/// an inbox); without it a quarantined one answers 403 `email_quarantined`.
+#[derive(Debug, Clone, Default)]
+pub struct GetInboxThreadEmailOptions {
+    pub include_quarantined: bool,
+}
+
+impl GetInboxThreadEmailOptions {
+    pub(crate) fn to_query(&self) -> Vec<(&'static str, String)> {
+        present([("include_quarantined", flag(self.include_quarantined))]).collect()
+    }
+}
+
+/// A message of a thread, in either direction. Inbound messages add
+/// `extracted_text`, `screening`, `spam_verdict` and `virus_verdict`;
+/// outbound ones add `status`, the email's last delivery event. A reply or
+/// forward that went out also carries `email_id`, `thread_id` and `inbox_id`.
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxThreadEmail {
+    pub id: String,
+    /// `inbound` | `outbound`.
+    pub direction: String,
+    /// `Name <address>` when there is a display name.
+    pub from: String,
+    pub to: Vec<String>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub reply_to: Vec<String>,
+    pub subject: Option<String>,
+    pub message_id: Option<String>,
+    pub html: Option<String>,
+    /// Inbound: invisible characters removed.
+    pub text: Option<String>,
+    pub attachments: Vec<ReceivedAttachment>,
+    pub read: bool,
+    pub received_at: String,
+    pub extracted_text: Option<String>,
+    pub screening: Option<Screening>,
+    pub spam_verdict: Option<String>,
+    pub virus_verdict: Option<String>,
+    pub status: Option<String>,
+    pub email_id: Option<String>,
+    pub thread_id: Option<String>,
+    pub inbox_id: Option<String>,
+}
+
+/// `text` and/or `html`, plus optional `subject` (default `Re: ` and the
+/// thread's), `cc`, `bcc`, `reply_all` and `requires_approval` (hold it as a
+/// draft for a person).
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ReplyInThreadOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_all: Option<bool>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_approval: Option<bool>,
+}
+
+/// `text` or `html` is a note above the quoted original, whose attachments go
+/// along.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct ForwardInThreadOptions {
+    pub to: Recipients,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub requires_approval: Option<bool>,
+}
+
+impl IdempotentTrait for &ReplyInThreadOptions {}
+impl IdempotentTrait for &ForwardInThreadOptions {}
+
+/// A draft, as returned by `drafts()` `create`, `get`, `update` and `reject`,
+/// and as a `list` row (rows carry `snippet` instead of `html` and `text`).
+/// `status` is `draft`, `pending_approval`, `sent`, `rejected` or `expired`;
+/// `approval_reasons` say why the inbox's rules hold it (`send_policy`,
+/// `ramp`, `reply_to_redirect`, …).
+#[derive(Debug, Clone, Default, Deserialize)]
+#[serde(default)]
+pub struct InboxDraft {
+    pub object: Option<String>,
+    pub id: String,
+    /// `standalone` | `reply`.
+    pub r#type: String,
+    pub to: Option<Vec<String>>,
+    pub cc: Vec<String>,
+    pub bcc: Vec<String>,
+    pub subject: Option<String>,
+    pub html: Option<String>,
+    pub text: Option<String>,
+    pub snippet: Option<String>,
+    pub thread_id: Option<String>,
+    pub reply_to_email_id: Option<String>,
+    /// Set once sent.
+    pub email_id: Option<String>,
+    pub created_at: Option<String>,
+    pub updated_at: String,
+    pub status: String,
+    pub approval_reasons: Vec<String>,
+    pub forward: bool,
+    pub decided_by: Option<String>,
+    pub decided_at: Option<String>,
+    pub expires_at: Option<String>,
+}
+
+/// A reply draft sets `thread_id` and `reply_to_email_id` together; an
+/// unsent reply draft to the same email is returned instead of a new one.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct CreateInboxDraftOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Recipients>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub thread_id: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub reply_to_email_id: Option<String>,
+}
+
+/// Each field: `Some(Some(v))` sets, `Some(None)` sends `null` (clears), `None`
+/// leaves it. Setting `html` or `text` replaces both.
+#[derive(Debug, Clone, Default, Serialize)]
+pub struct UpdateInboxDraftOptions {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub to: Option<Option<Recipients>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub cc: Option<Option<Recipients>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub bcc: Option<Option<Recipients>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub subject: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub html: Option<Option<String>>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub text: Option<Option<String>>,
+}
+
+/// Returned by `drafts().send` once the draft went out.
+#[derive(Debug, Clone, Default, PartialEq, Eq, Deserialize)]
+#[serde(default)]
+pub struct InboxDraftSent {
+    pub object: String,
+    pub id: String,
+    pub thread_id: Option<String>,
+    pub email_id: Option<String>,
 }

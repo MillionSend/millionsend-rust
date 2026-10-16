@@ -2,9 +2,9 @@
 //! self-hostable, Resend-compatible email API.
 //!
 //! Construct a [`MillionSend`] once and reuse it (it is cheap to [`Clone`]). Each
-//! resource hangs off a public field: `emails`, `batch`, `contacts`, `topics`,
-//! `broadcasts`, `segments`, `suppressions`, `domains`, `webhooks`, `api_keys`,
-//! `templates`, `deliverability`, `usage`.
+//! resource hangs off a public field: `emails`, `batch`, `receiving`,
+//! `contacts`, `topics`, `broadcasts`, `segments`, `suppressions`, `domains`,
+//! `webhooks`, `api_keys`, `templates`, `deliverability`, `usage`, `inboxes`.
 //!
 //! ```no_run
 //! use millionsend::{MillionSend, SendEmailOptions};
@@ -27,7 +27,8 @@
 //! ```
 //!
 //! Fallible calls return [`Result<T, Error>`](Error); [`Error::Api`] carries the
-//! API's `{ statusCode, name, message }`, [`Error::Http`] a transport failure
+//! API's `{ statusCode, name, message }` and the `retry-after` header
+//! ([`retry_after`](Error::retry_after)), [`Error::Http`] a transport failure
 //! (its [`status_code`](Error::status_code) is `None`).
 
 mod api_keys;
@@ -38,6 +39,8 @@ mod domains;
 mod emails;
 mod error;
 mod http;
+mod inboxes;
+mod receiving;
 mod segments;
 mod suppressions;
 mod templates;
@@ -57,6 +60,11 @@ pub use deliverability::Deliverability;
 pub use domains::Domains;
 pub use emails::{Batch, Emails};
 pub use error::{ApiError, Error, Result};
+pub use inboxes::{
+    InboxCodes, InboxDrafts, InboxLabels, InboxQuarantine, InboxSafetyRules, InboxThreadEmails,
+    InboxThreads, Inboxes,
+};
+pub use receiving::{Receiving, ReceivingAttachments};
 pub use segments::Segments;
 pub use suppressions::Suppressions;
 pub use templates::Templates;
@@ -72,6 +80,7 @@ const DEFAULT_BASE_URL: &str = "https://api.millionsend.com";
 pub struct MillionSend {
     pub emails: Emails,
     pub batch: Batch,
+    pub receiving: Receiving,
     pub contacts: Contacts,
     pub topics: Topics,
     pub broadcasts: Broadcasts,
@@ -83,6 +92,7 @@ pub struct MillionSend {
     pub templates: Templates,
     pub deliverability: Deliverability,
     pub usage: Usage,
+    pub inboxes: Inboxes,
 }
 
 impl MillionSend {
@@ -109,6 +119,7 @@ impl MillionSend {
                 status_code: None,
                 name: "missing_api_key".to_string(),
                 message: "Set MILLIONSEND_API_KEY or use MillionSend::new(api_key).".to_string(),
+                retry_after: None,
             })
         })?;
         Ok(Self::new(api_key))
@@ -144,6 +155,7 @@ impl MillionSend {
         MillionSend {
             emails: Emails(config.clone()),
             batch: Batch(config.clone()),
+            receiving: Receiving(config.clone()),
             contacts: Contacts::new(config.clone()),
             topics: Topics(config.clone()),
             broadcasts: Broadcasts(config.clone()),
@@ -154,7 +166,8 @@ impl MillionSend {
             api_keys: ApiKeys(config.clone()),
             templates: Templates(config.clone()),
             deliverability: Deliverability(config.clone()),
-            usage: Usage(config),
+            usage: Usage(config.clone()),
+            inboxes: Inboxes(config),
         }
     }
 }

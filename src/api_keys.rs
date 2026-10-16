@@ -11,7 +11,9 @@ use crate::types::{
 pub struct ApiKeys(pub(crate) Arc<Config>);
 
 impl ApiKeys {
-    /// `POST /api-keys` — the returned `token` is shown only once.
+    /// `POST /api-keys` — the returned `token` is shown only once. A
+    /// `domain_id` must be one of the team's own domains, not the
+    /// `shared: true` row.
     pub async fn create(&self, api_key: &CreateApiKeyOptions) -> Result<ApiKeyToken> {
         self.0.post(&["api-keys"], api_key).await
     }
