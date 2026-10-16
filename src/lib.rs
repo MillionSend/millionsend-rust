@@ -15,7 +15,7 @@
 //!     .emails
 //!     .send(&SendEmailOptions {
 //!         from: "Acme <onboarding@acme.dev>".into(),
-//!         to: "delivered@resend.dev".into(),
+//!         to: "success@simulator.amazonses.com".into(),
 //!         subject: "Hello".into(),
 //!         html: Some("<strong>it works</strong>".into()),
 //!         ..Default::default()

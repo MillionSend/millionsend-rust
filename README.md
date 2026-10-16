@@ -31,7 +31,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error>> {
         .emails
         .send(&SendEmailOptions {
             from: "Acme <onboarding@acme.dev>".into(),
-            to: "delivered@resend.dev".into(),
+            to: "success@simulator.amazonses.com".into(),
             subject: "Hello from MillionSend".into(),
             html: Some("<strong>It works!</strong>".into()),
             ..Default::default()
