@@ -27,7 +27,8 @@
 //! ```
 //!
 //! Fallible calls return [`Result<T, Error>`](Error); [`Error::Api`] carries the
-//! API's `{ statusCode, name, message }`, [`Error::Http`] a transport failure
+//! API's `{ statusCode, name, message }` and the `retry-after` header
+//! ([`retry_after`](Error::retry_after)), [`Error::Http`] a transport failure
 //! (its [`status_code`](Error::status_code) is `None`).
 
 mod api_keys;
@@ -118,6 +119,7 @@ impl MillionSend {
                 status_code: None,
                 name: "missing_api_key".to_string(),
                 message: "Set MILLIONSEND_API_KEY or use MillionSend::new(api_key).".to_string(),
+                retry_after: None,
             })
         })?;
         Ok(Self::new(api_key))

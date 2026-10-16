@@ -90,6 +90,7 @@ impl Config {
                 status_code: None,
                 name: "validation_error".to_string(),
                 message: r#"An id in the request path is empty, "." or ".."."#.to_string(),
+                retry_after: None,
             }));
         }
         let mut url = self.base_url.clone();
@@ -241,6 +242,7 @@ impl Config {
                     "Refusing to send the API key over plain http to {}. Use https, or call MillionSend::allow_insecure_http().",
                     self.base_url
                 ),
+                retry_after: None,
             }));
         }
         let response = req
@@ -252,12 +254,21 @@ impl Config {
             .map_err(Error::Http)?;
 
         let status = response.status();
+        let retry_after = response
+            .headers()
+            .get(reqwest::header::RETRY_AFTER)
+            .and_then(|value| value.to_str().ok())
+            .and_then(|value| value.trim().parse::<u64>().ok());
         let body = response.bytes().await.map_err(Error::Http)?;
 
         if status.is_success() {
             decode(status.as_u16(), &body)
         } else {
-            Err(Error::Api(ApiError::parse(status.as_u16(), &body)))
+            Err(Error::Api(ApiError::parse(
+                status.as_u16(),
+                &body,
+                retry_after,
+            )))
         }
     }
 }

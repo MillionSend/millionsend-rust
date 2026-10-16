@@ -12,6 +12,10 @@ pub struct ApiError {
     /// Stable snake_case discriminant, e.g. `validation_error`, `not_found`.
     pub name: String,
     pub message: String,
+    /// Seconds the response's `retry-after` header asks to wait before trying
+    /// again; `None` when it sent none, and when the request never reached the
+    /// API.
+    pub retry_after: Option<u64>,
 }
 
 impl fmt::Display for ApiError {
@@ -34,7 +38,7 @@ struct RawApiError {
 }
 
 impl ApiError {
-    pub(crate) fn parse(status: u16, body: &[u8]) -> Self {
+    pub(crate) fn parse(status: u16, body: &[u8], retry_after: Option<u64>) -> Self {
         if let Ok(raw) = serde_json::from_slice::<RawApiError>(body) {
             return ApiError {
                 status_code: raw.status_code.or(Some(status)),
@@ -42,12 +46,14 @@ impl ApiError {
                 message: raw
                     .message
                     .unwrap_or_else(|| format!("Request failed with status {status}")),
+                retry_after,
             };
         }
         ApiError {
             status_code: Some(status),
             name: "application_error".to_string(),
             message: format!("Request failed with status {status}"),
+            retry_after,
         }
     }
 }
@@ -77,6 +83,15 @@ impl Error {
     pub fn name(&self) -> Option<&str> {
         match self {
             Error::Api(err) => Some(&err.name),
+            _ => None,
+        }
+    }
+
+    /// The `retry-after` of an API error, in seconds; `None` when the response
+    /// sent none, and for transport/parse failures.
+    pub fn retry_after(&self) -> Option<u64> {
+        match self {
+            Error::Api(err) => err.retry_after,
             _ => None,
         }
     }

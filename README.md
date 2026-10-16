@@ -84,12 +84,14 @@ non-TLS instance elsewhere (e.g. inside a private network).
 
 Fallible calls return `Result<T, millionsend::Error>`:
 
-- `Error::Api(ApiError { status_code, name, message })` — a non-2xx response.
-  `name` is a stable snake_case code you can match on (`validation_error`,
-  `not_found`, `restricted_api_key`, `sending_paused`,
-  `all_recipients_suppressed`, and for receiving and inboxes
-  `inbox_send_policy`, `inbox_send_cap_reached`, `approval_required`,
-  `email_quarantined`, `email_blocked`, `too_many_waits`, …).
+- `Error::Api(ApiError { status_code, name, message, retry_after })` — a
+  non-2xx response. `name` is a stable snake_case code you can match on
+  (`validation_error`, `not_found`, `forbidden`, `restricted_api_key`,
+  `rate_limit_exceeded`, `sending_paused`, `all_recipients_suppressed`, and for
+  receiving and inboxes `inbox_send_policy`, `inbox_send_cap_reached`,
+  `approval_required`, `email_quarantined`, `email_blocked`, `too_many_waits`,
+  `name_review_unavailable`, …). `retry_after` is the response's `retry-after`
+  header in seconds, `None` when it sent none.
 - `Error::Http(_)` — a transport failure that never reached the API;
   `err.status_code()` is `None`.
 - `Error::Parse(_)` — a 2xx body that failed to deserialize.
@@ -101,6 +103,9 @@ match ms.emails.get(&id).await {
     Err(err) => eprintln!("{err}"),
 }
 ```
+
+An unknown route answers 404 `not_found` (`application_error` from servers
+before v0.13.0). Match on `name` and `status_code`; messages may change.
 
 ## Resources
 

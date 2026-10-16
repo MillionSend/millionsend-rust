@@ -826,6 +826,66 @@ async fn transport_failure_surfaces_as_http_with_null_status() {
     assert_eq!(err.status_code(), None);
 }
 
+#[tokio::test]
+async fn errors_carry_retry_after_from_the_header() {
+    let server = MockServer::start().await;
+    Mock::given(method("POST"))
+        .and(path("/inboxes"))
+        .respond_with(
+            ResponseTemplate::new(503)
+                .insert_header("retry-after", "300")
+                .set_body_json(json!({
+                    "statusCode": 503, "name": "name_review_unavailable",
+                    "message": "Names on the shared domain can't be reviewed right now"
+                })),
+        )
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let err = ms
+        .inboxes
+        .create(&CreateInboxOptions::default())
+        .await
+        .unwrap_err();
+    assert_eq!(err.status_code(), Some(503));
+    assert_eq!(err.name(), Some("name_review_unavailable"));
+    assert_eq!(err.retry_after(), Some(300));
+    match err {
+        Error::Api(api) => assert_eq!(api.retry_after, Some(300)),
+        other => panic!("expected Api error, got {other:?}"),
+    }
+}
+
+#[tokio::test]
+async fn unknown_routes_answer_404_with_or_without_a_json_body() {
+    let server = MockServer::start().await;
+    // Servers before v0.13.0 answer an unknown route in plain text.
+    Mock::given(method("GET"))
+        .and(path("/emails/old"))
+        .respond_with(ResponseTemplate::new(404).set_body_string("404 Not Found"))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/emails/new"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "statusCode": 404, "name": "not_found",
+            "message": "The requested endpoint does not exist."
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let old = ms.emails.get("old").await.unwrap_err();
+    assert_eq!(old.status_code(), Some(404));
+    assert_eq!(old.name(), Some("application_error"));
+    assert_eq!(old.retry_after(), None);
+    let new = ms.emails.get("new").await.unwrap_err();
+    assert_eq!(new.status_code(), Some(404));
+    assert_eq!(new.name(), Some("not_found"));
+    assert_eq!(new.retry_after(), None);
+}
+
 // ---- body completeness ---------------------------------------------------
 
 #[tokio::test]
