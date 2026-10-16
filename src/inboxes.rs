@@ -20,7 +20,11 @@ pub struct Inboxes(pub(crate) Arc<Config>);
 
 impl Inboxes {
     /// `POST /inboxes` — `&CreateInboxOptions::default()` gets a random
-    /// address on the shared inbox domain.
+    /// address on the shared inbox domain. Shared and forwarding creates
+    /// answer 503 `name_review_unavailable` (see
+    /// [`retry_after`](crate::Error::retry_after)) while the team's subdomain
+    /// awaits its name review, and so does a chosen `username` or `from_name`
+    /// there while the review is down; a spent review budget answers 429.
     pub async fn create(&self, inbox: &CreateInboxOptions) -> Result<Inbox> {
         self.0.post(&["inboxes"], inbox).await
     }
@@ -36,7 +40,8 @@ impl Inboxes {
         self.0.get(&["inboxes", id_or_email], &[]).await
     }
 
-    /// `PATCH /inboxes/:id` — name, display name, expiry.
+    /// `PATCH /inboxes/:id` — name, display name, expiry. A new `from_name` on
+    /// the shared domain is reviewed like on `create` (503, 429).
     pub async fn update(&self, id: &str, changes: &UpdateInboxOptions) -> Result<Inbox> {
         self.0.patch(&["inboxes", id], changes).await
     }

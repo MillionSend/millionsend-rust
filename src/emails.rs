@@ -14,7 +14,10 @@ pub struct Emails(pub(crate) Arc<Config>);
 
 impl Emails {
     /// `POST /emails`. Pass `&email`, or `email.with_idempotency_key("k")` to
-    /// attach an `Idempotency-Key` (retries collapse to one send).
+    /// attach an `Idempotency-Key` (retries collapse to one send). The shared
+    /// domain sends only in `sending_mode: open`, from an inbox's exact address
+    /// (display name omitted or its `from_name`), without `reply_to`,
+    /// `attachments`, `headers` or `scheduled_at`, to at most 10 recipients.
     pub async fn send<'a>(
         &self,
         email: impl Into<Idempotent<&'a SendEmailOptions>>,
@@ -85,7 +88,9 @@ pub struct Batch(pub(crate) Arc<Config>);
 
 impl Batch {
     /// `POST /emails/batch` — 1–100 emails as a bare array. Pass `&emails`, or
-    /// `emails.with_idempotency_key("k")`.
+    /// `emails.with_idempotency_key("k")`; a retry of an accepted batch gets
+    /// its stored response. An item from the shared domain is refused (403
+    /// `inbox_send_policy`).
     pub async fn send<'a>(
         &self,
         emails: impl Into<Idempotent<&'a [SendEmailOptions]>>,

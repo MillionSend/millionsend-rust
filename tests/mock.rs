@@ -1144,7 +1144,8 @@ async fn contacts_create_batch_sends_query_header_and_typed_response() {
         .respond_with(ok_json(json!({
             "data": [{ "object": "contact", "index": 0, "id": "c1", "status": "updated" }],
             "counts": { "created": 0, "updated": 1, "skipped": 0, "failed": 1 },
-            "errors": [{ "index": 1, "message": "email: invalid" }]
+            "errors": [{ "index": 1, "statusCode": 422, "name": "validation_error",
+                         "message": "email: invalid" }]
         })))
         .mount(&server)
         .await;
@@ -1164,7 +1165,15 @@ async fn contacts_create_batch_sends_query_header_and_typed_response() {
     assert_eq!(res.data[0].status, BatchContactStatus::Updated);
     assert_eq!(res.data[0].index, 0);
     assert_eq!(res.counts.failed, 1);
-    assert_eq!(res.errors[0].index, 1);
+    assert_eq!(
+        res.errors,
+        vec![BatchContactError {
+            index: 1,
+            status_code: Some(422),
+            name: Some("validation_error".into()),
+            message: "email: invalid".into(),
+        }]
+    );
 }
 
 #[tokio::test]
@@ -1686,6 +1695,8 @@ async fn domains_cover_create_get_list_verify_update_delete() {
     assert_eq!(created.records[0].priority, None);
     assert_eq!(created.records[1].priority, Some(10));
     assert_eq!(created.capabilities.sending, "enabled");
+    assert!(!created.shared);
+    assert_eq!(created.sending_mode, None);
     assert_eq!(
         ms.domains
             .get("d1")
@@ -1709,6 +1720,76 @@ async fn domains_cover_create_get_list_verify_update_delete() {
     };
     assert_eq!(ms.domains.update("d1", &changes).await.unwrap().id, "d1");
     assert!(ms.domains.delete("d1").await.unwrap().deleted);
+}
+
+#[tokio::test]
+async fn domains_list_ends_with_the_read_only_shared_row() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/domains/sd1"))
+        .respond_with(ok_json(json!({
+            "object": "domain", "id": "sd1", "name": "acme.agents.example", "status": "verified",
+            "created_at": "2026-10-01T00:00:00.000Z", "region": "us-east-1",
+            "open_tracking": false, "click_tracking": false, "tracking_subdomain": null,
+            "capabilities": { "sending": "enabled", "receiving": "enabled" },
+            "receiving_catch_all": false, "shared": true,
+            "sending_mode": "reply_only", "sending_mode_reason": "plan", "records": []
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/domains"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [
+                { "id": "d1", "name": "acme.dev", "status": "verified",
+                  "created_at": "2026-10-02T00:00:00.000Z", "region": "us-east-1",
+                  "open_tracking": false, "click_tracking": false, "tracking_subdomain": null,
+                  "capabilities": { "sending": "enabled", "receiving": "disabled" },
+                  "receiving_catch_all": false, "shared": false },
+                // A mode this SDK never saw still parses.
+                { "id": "sd1", "name": "acme.agents.example", "status": "verified",
+                  "created_at": "2026-10-01T00:00:00.000Z", "region": "us-east-1",
+                  "open_tracking": false, "click_tracking": false, "tracking_subdomain": null,
+                  "capabilities": { "sending": "enabled", "receiving": "enabled" },
+                  "receiving_catch_all": false, "shared": true,
+                  "sending_mode": "warming_up", "sending_mode_reason": null }
+            ]
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("PATCH"))
+        .and(path("/domains/sd1"))
+        .respond_with(ResponseTemplate::new(403).set_body_json(json!({
+            "statusCode": 403, "name": "forbidden",
+            "message": "acme.agents.example is your team's subdomain of the shared domain: it can't be changed or deleted"
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let shared = ms.domains.get("sd1").await.unwrap();
+    assert!(shared.shared);
+    assert_eq!(shared.sending_mode.as_deref(), Some("reply_only"));
+    assert_eq!(shared.sending_mode_reason.as_deref(), Some("plan"));
+    assert!(shared.records.is_empty());
+
+    let list = ms.domains.list(None).await.unwrap();
+    let (own, shared) = (&list.data[0], &list.data[1]);
+    assert!(!own.shared);
+    assert_eq!(own.sending_mode, None);
+    assert_eq!(own.sending_mode_reason, None);
+    assert!(shared.shared);
+    assert_eq!(shared.sending_mode.as_deref(), Some("warming_up"));
+    assert_eq!(shared.sending_mode_reason, None);
+
+    let changes = UpdateDomainOptions {
+        click_tracking: Some(true),
+        ..Default::default()
+    };
+    let err = ms.domains.update("sd1", &changes).await.unwrap_err();
+    assert_eq!(err.status_code(), Some(403));
+    assert_eq!(err.name(), Some("forbidden"));
 }
 
 // ---- webhooks ------------------------------------------------------------
@@ -2295,7 +2376,7 @@ fn inbox_json() -> serde_json::Value {
         "email_address": "signup-bot-7f3k@acme.agents.example", "domain_id": "sd1",
         "receiving_address": null, "from_name": null, "unread": 2, "drafts": 1,
         "last_received": "2026-10-12T10:00:00.000Z", "created_at": "2026-10-12T09:00:00.000Z",
-        "kind": "agent", "shared": true, "expires_at": "2026-10-13T09:00:00.000Z",
+        "kind": "agent", "shared": true, "expires_at": null,
         "quarantined": 1, "pending_approval": 1
     })
 }
@@ -2447,6 +2528,8 @@ async fn long_polls_stretch_the_request_timeout() {
         .await
         .unwrap();
     assert_eq!(code.status, "timeout");
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests.last().unwrap().url.query(), Some("wait=1"));
 }
 
 #[tokio::test]
@@ -2717,6 +2800,7 @@ async fn inboxes_cover_create_list_get_update_delete() {
             send_cap: Some(None),
             ..Default::default()
         }),
+        ..Default::default()
     };
     ms.inboxes.create(&create).await.unwrap();
     let options = ListInboxesOptions {
@@ -2741,6 +2825,83 @@ async fn inboxes_cover_create_list_get_update_delete() {
     };
     ms.inboxes.update("i1", &changes).await.unwrap();
     assert!(ms.inboxes.delete("i1").await.unwrap().deleted);
+}
+
+#[tokio::test]
+async fn inboxes_create_takes_username_and_domain_id() {
+    let server = MockServer::start().await;
+    for body in [
+        json!({ "username": "ada" }),
+        json!({ "domain_id": "sd1" }),
+        json!({ "domain_id": "d1", "username": "support" }),
+    ] {
+        Mock::given(method("POST"))
+            .and(path("/inboxes"))
+            .and(body_json(body))
+            .respond_with(ResponseTemplate::new(201).set_body_json(inbox_json()))
+            .expect(1)
+            .mount(&server)
+            .await;
+    }
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    for create in [
+        CreateInboxOptions {
+            username: Some("ada".into()),
+            ..Default::default()
+        },
+        CreateInboxOptions {
+            domain_id: Some("sd1".into()),
+            ..Default::default()
+        },
+        CreateInboxOptions {
+            domain_id: Some("d1".into()),
+            username: Some("support".into()),
+            ..Default::default()
+        },
+    ] {
+        ms.inboxes.create(&create).await.unwrap();
+    }
+}
+
+#[tokio::test]
+async fn receiving_list_reads_unread_alone_and_refuses_an_unknown_inbox_at_once() {
+    let server = MockServer::start().await;
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving"))
+        .and(query_param("inbox_id", "gone"))
+        .respond_with(ResponseTemplate::new(404).set_body_json(json!({
+            "statusCode": 404, "name": "not_found", "message": "Inbox not found."
+        })))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/emails/receiving"))
+        .and(query_param("unread", "false"))
+        .respond_with(ok_json(
+            json!({ "object": "list", "has_more": false, "data": [] }),
+        ))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let unknown = ListReceivedEmailsOptions {
+        inbox_id: Some("gone".into()),
+        wait: Some(30),
+        ..Default::default()
+    };
+    let err = ms.receiving.list(Some(&unknown)).await.unwrap_err();
+    assert_eq!(err.status_code(), Some(404));
+    assert_eq!(err.name(), Some("not_found"));
+
+    // An inbox-scoped key reads its own inbox's unread state without inbox_id.
+    let unread = ListReceivedEmailsOptions {
+        unread: Some(false),
+        ..Default::default()
+    };
+    ms.receiving.list(Some(&unread)).await.unwrap();
+    let requests = server.received_requests().await.unwrap();
+    assert_eq!(requests[1].url.query(), Some("unread=false"));
 }
 
 #[tokio::test]
@@ -2770,6 +2931,7 @@ async fn inbox_safety_codes_and_quarantine() {
         .and(query_param("from", "github.com"))
         .and(query_param("wait", "20"))
         .and(query_param("max_age", "600"))
+        .and(query_param("since", "2026-10-16T12:00:00.000Z"))
         .respond_with(ok_json(json!({
             "object": "verification_code", "status": "found", "kind": "otp", "code": "482913",
             "url": null, "link_domain_matches_sender": null, "email_id": "r1",
@@ -2824,6 +2986,7 @@ async fn inbox_safety_codes_and_quarantine() {
         from: Some("github.com".into()),
         wait: Some(20),
         max_age: Some(600),
+        since: Some("2026-10-16T12:00:00.000Z".into()),
     };
     let code = ms
         .inboxes
@@ -2936,7 +3099,8 @@ async fn inbox_threads_send_lists_as_csv() {
                        "to": ["bot@acme.dev"], "cc": [], "bcc": [],
                        "labels": [{ "id": "l1", "name": "Billing", "color": "#FFAA00" }],
                        "message_count": 2, "has_attachment": true, "has_draft": false, "read": true,
-                       "received_at": "2026-10-12T10:00:00.000Z", "folder": "quarantine" }]
+                       "quarantined": 2, "received_at": "2026-10-12T10:00:00.000Z",
+                       "folder": "quarantine" }]
         })))
         .mount(&server)
         .await;
@@ -2992,6 +3156,7 @@ async fn inbox_threads_send_lists_as_csv() {
         .unwrap();
     assert_eq!(list.data[0].folder, "quarantine"); // an enum value this SDK never saw still parses
     assert_eq!(list.data[0].labels[0].name, "Billing");
+    assert_eq!(list.data[0].quarantined, Some(2));
 
     let search = SearchInboxThreadsOptions {
         query: Some("\"invoice 42\" -spam".into()),
@@ -3006,6 +3171,7 @@ async fn inbox_threads_send_lists_as_csv() {
     let found = ms.inboxes.threads().search("i1", &search).await.unwrap();
     assert_eq!(found.data[0].matched_email_id.as_deref(), Some("m2"));
     assert_eq!(found.data[0].highlights["subject"], vec!["**Invoice** 42"]);
+    assert_eq!(found.data[0].quarantined, None);
 
     let requests = server.received_requests().await.unwrap();
     assert_eq!(

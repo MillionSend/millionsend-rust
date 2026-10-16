@@ -15,7 +15,8 @@ use crate::types::{
 pub struct Broadcasts(pub(crate) Arc<Config>);
 
 impl Broadcasts {
-    /// `POST /broadcasts`
+    /// `POST /broadcasts` — sending from the shared domain answers 403
+    /// `inbox_send_policy`, here with `send: true` and on `send`.
     pub async fn create(&self, broadcast: &CreateBroadcastOptions) -> Result<BroadcastId> {
         self.0.post(&["broadcasts"], broadcast).await
     }

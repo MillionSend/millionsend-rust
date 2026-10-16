@@ -23,7 +23,8 @@ async fn contact_lifecycle() {
         .unwrap()
         .as_millis();
 
-    let email = format!("sdk-e2e-{stamp}@example.com");
+    // The API refuses addresses that can never receive mail (example.com, …).
+    let email = format!("success+sdk-e2e-{stamp}@simulator.amazonses.com");
     ms.contacts
         .create(&CreateContactOptions {
             email: email.clone(),

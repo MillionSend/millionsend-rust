@@ -128,6 +128,19 @@ pub struct BatchError {
     pub message: String,
 }
 
+/// A per-item failure from a permissive contacts batch, with the status and
+/// name strict mode would have answered for the item (both `None` on servers
+/// before v0.12.0).
+#[derive(Debug, Clone, PartialEq, Eq, Deserialize)]
+pub struct BatchContactError {
+    pub index: u32,
+    #[serde(default, rename = "statusCode")]
+    pub status_code: Option<u16>,
+    #[serde(default)]
+    pub name: Option<String>,
+    pub message: String,
+}
+
 /// `{ object, id, deleted: true }` — the envelope every `delete` returns.
 #[derive(Debug, Clone, Deserialize)]
 pub struct Deleted {
@@ -143,7 +156,11 @@ pub struct Deleted {
 #[derive(Debug, Clone, Default)]
 pub struct ListOptions {
     pub limit: Option<u32>,
+    /// The last id of a page: the next page, toward older items on the
+    /// newest-first lists.
     pub after: Option<String>,
+    /// The first id of a page: the previous page, toward newer items on the
+    /// newest-first lists.
     pub before: Option<String>,
 }
 
@@ -183,8 +200,13 @@ pub struct List<T> {
 /// struct literal with `..Default::default()`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct SendEmailOptions {
+    /// An address on a verified domain, or an inbox's exact address on the
+    /// shared domain (`sending_mode: open` only).
     pub from: String,
+    /// An address here or in `cc`/`bcc` on a domain that can never receive
+    /// mail (`example.com`, `.test`, `.invalid`, …) answers 422.
     pub to: Recipients,
+    /// Up to 998 characters.
     pub subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
@@ -447,7 +469,7 @@ pub struct BatchContactsResponse {
     pub counts: BatchContactsCounts,
     /// Permissive mode only: the failed items by request index.
     #[serde(default)]
-    pub errors: Vec<BatchError>,
+    pub errors: Vec<BatchContactError>,
 }
 
 #[derive(Debug, Clone, Deserialize)]
@@ -895,7 +917,10 @@ pub struct CreateBroadcastOptions {
     /// Neither `segment_id` nor `topic_id` set = send to all contacts.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub segment_id: Option<String>,
+    /// Never the shared domain: sending from it answers 403
+    /// `inbox_send_policy`.
     pub from: String,
+    /// Up to 998 characters.
     pub subject: String,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub html: Option<String>,
@@ -1241,6 +1266,20 @@ pub struct Domain {
     pub capabilities: DomainCapabilities,
     #[serde(default)]
     pub receiving_catch_all: bool,
+    /// The team's read-only subdomain of the shared inbox domain, the last row
+    /// of `list`; it sends only from its inboxes' own addresses. `false` on
+    /// servers before v0.14.0.
+    #[serde(default)]
+    pub shared: bool,
+    /// Shared row only: what its inboxes may send. `open` starts
+    /// conversations, `reply_only` replies inside threads, `receive_only`
+    /// sends nothing.
+    #[serde(default)]
+    pub sending_mode: Option<String>,
+    /// Shared row only: what holds sending below `open`, `plan` or `instance`;
+    /// `None` under `open`.
+    #[serde(default)]
+    pub sending_mode_reason: Option<String>,
     /// DNS records to publish; absent on `list`.
     #[serde(default)]
     pub records: Vec<DomainRecord>,
@@ -1278,7 +1317,8 @@ pub enum ApiKeyPermission {
 }
 
 /// `permission` defaults to `full_access`; `domain_id` restricts a
-/// `sending_access` key to one domain; `inbox_id` makes a `full_access` key
+/// `sending_access` key to one of the team's own domains (the `shared: true`
+/// row of `domains.list` answers 422); `inbox_id` makes a `full_access` key
 /// that reads and sends for that one inbox (at most 5 per inbox).
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateApiKeyOptions {
@@ -1604,8 +1644,10 @@ pub struct Screening {
 /// Filters and paginates `receiving.list` (newest first). `wait` (up to 50
 /// seconds) long-polls for mail newer than `before` or `since` (default: a
 /// minute before the call) and answers an empty page when nothing arrives.
-/// `from` is an address, or a domain covering its subdomains; `unread` needs
-/// `inbox_id`; `include_quarantined` (full-access keys) also lists held mail,
+/// An `inbox_id` that doesn't exist answers 404 `not_found` at once, even with
+/// `wait`. `from` is an address, or a domain covering its subdomains; `unread`
+/// needs `inbox_id`, except with an inbox-scoped key, which reads its own
+/// inbox; `include_quarantined` (full-access keys) also lists held mail,
 /// `quarantined` lists held mail only.
 #[derive(Debug, Clone, Default)]
 pub struct ListReceivedEmailsOptions {
@@ -1867,8 +1909,8 @@ pub struct Inbox {
     pub name: Option<String>,
     /// Lowercase; fixed at creation.
     pub email_address: String,
-    /// The custom domain, or the team's subdomain of the shared inbox domain
-    /// (which `domains.list` does not show).
+    /// The custom domain, or the team's subdomain of the shared inbox domain:
+    /// the `shared: true` row of `domains.list`.
     pub domain_id: Option<String>,
     /// Set for forwarding inboxes.
     pub receiving_address: Option<String>,
@@ -1889,17 +1931,32 @@ pub struct Inbox {
     pub pending_approval: u64,
 }
 
-/// Every field optional. Without `email_address` the inbox gets a random
-/// address on the shared inbox domain. `kind` is `agent` (the default:
-/// screening, code extraction and send rules on) or `human`. `expires_in` is
-/// like `1h`, `24h` or `30d`; omitted, the server default applies (never on a
-/// custom domain, 24h on the shared one). `safety` sets any of the rules.
+/// Every field optional. Without `email_address` or `domain_id` the inbox gets
+/// an address on the shared inbox domain: `username`, or a random one. `kind`
+/// is `agent` (the default: screening, code extraction and send rules on) or
+/// `human`. `expires_in` runs from `1h` to `365d`; omitted, the inbox never
+/// expires, though a shared-domain inbox unused for 90 days is deleted either
+/// way. `safety` sets any of the rules.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct CreateInboxOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
     pub email_address: Option<String>,
+    /// Instead of `email_address`, the id of a `domains.list` row: the
+    /// `shared: true` row works like leaving both out; one of the team's own
+    /// domains needs `username`.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub domain_id: Option<String>,
+    /// The part before the @, required with the `domain_id` of one of the
+    /// team's own domains. On the shared domain it is optional (random when
+    /// omitted) and takes 1–64 of `a-z 0-9 . _ -`, starting and ending with a
+    /// letter or digit; reserved names and brand look-alikes answer 422. An
+    /// address in use answers 409.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub username: Option<String>,
+    /// 1–320 characters.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub name: Option<String>,
+    /// Reviewed on the shared domain, like `username`.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub from_name: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1912,9 +1969,10 @@ pub struct CreateInboxOptions {
     pub safety: Option<InboxSafetyUpdate>,
 }
 
-/// `from_name: Some(String::new())` removes the display name. `expires_in`:
-/// `Some(Some("7d"))` sets, `Some(None)` sends `null` (never expires), `None`
-/// leaves it.
+/// `name` takes 1–320 characters. `from_name: Some(String::new())` removes the
+/// display name; a new one on the shared domain is reviewed. `expires_in`:
+/// `Some(Some("7d"))` sets a lifetime from now (`1h` to `365d`), `Some(None)`
+/// sends `null` (never expires), `None` leaves it.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct UpdateInboxOptions {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -1957,6 +2015,7 @@ pub struct InboxSafety {
     pub accept_from: String,
     /// `local@domain` or `*@domain`.
     pub allowlist: Vec<String>,
+    /// Ignored on the shared domain: they don't make senders trusted there.
     pub owner_addresses: Vec<String>,
     pub screening: bool,
     pub extract_codes: bool,
@@ -1966,12 +2025,15 @@ pub struct InboxSafety {
     pub private_codes: bool,
     /// Recipients per UTC day; `None`: no inbox cap.
     pub send_cap: Option<u32>,
+    /// On the shared domain, team members' sign-in addresses only.
     pub forward_to: Vec<String>,
 }
 
 /// A partial set of rules for `inboxes.safety().update` and
 /// [`CreateInboxOptions::safety`]; `None` fields are left unchanged.
-/// `send_cap: Some(None)` sends `null`: no daily cap.
+/// `send_cap: Some(None)` sends `null`: no daily cap. On the shared domain
+/// `send_policy: "allowlist"` answers 422, and so does `"open"` unless the
+/// shared row's `sending_mode` is `open`.
 #[derive(Debug, Clone, Default, Serialize)]
 pub struct InboxSafetyUpdate {
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -2016,12 +2078,17 @@ pub struct VerificationCode {
 
 /// `from` is an address, or a domain covering its subdomains. `wait` (up to 50
 /// seconds) long-polls for a new code. `max_age` (60–86400 seconds, server
-/// default 600) bounds how old the email may be.
+/// default 600) bounds how long ago the email was delivered, or released from
+/// quarantine.
 #[derive(Debug, Clone, Default)]
 pub struct LatestCodeOptions {
     pub from: Option<String>,
     pub wait: Option<u32>,
     pub max_age: Option<u32>,
+    /// ISO 8601 with `Z` or an offset: only mail received after it. Pass the
+    /// previous code's `received_at` so a second sign-in waits for its own
+    /// code.
+    pub since: Option<String>,
 }
 
 impl LatestCodeOptions {
@@ -2030,6 +2097,7 @@ impl LatestCodeOptions {
             ("from", self.from.clone()),
             ("wait", self.wait.map(|w| w.to_string())),
             ("max_age", self.max_age.map(|m| m.to_string())),
+            ("since", self.since.clone()),
         ])
         .collect()
     }
@@ -2132,6 +2200,9 @@ pub struct InboxThreadListItem {
     pub has_attachment: bool,
     pub has_draft: bool,
     pub read: bool,
+    /// With `include_quarantined`, in owner views: messages in quarantine not
+    /// yet released.
+    pub quarantined: Option<u64>,
     pub received_at: String,
     pub folder: String,
     pub matched_email_id: Option<String>,
@@ -2353,7 +2424,8 @@ impl IdempotentTrait for &ForwardInThreadOptions {}
 /// A draft, as returned by `drafts()` `create`, `get`, `update` and `reject`,
 /// and as a `list` row (rows carry `snippet` instead of `html` and `text`).
 /// `status` is `draft`, `pending_approval`, `sent`, `rejected` or `expired`;
-/// `approval_reasons` say why the inbox's rules hold it.
+/// `approval_reasons` say why the inbox's rules hold it (`send_policy`,
+/// `ramp`, `reply_to_redirect`, …).
 #[derive(Debug, Clone, Default, Deserialize)]
 #[serde(default)]
 pub struct InboxDraft {
