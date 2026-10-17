@@ -196,9 +196,12 @@ ms.emails.delete(&id).await?;                                     // DELETE /ema
 Every field is put on the wire, including `template`, which the API currently
 rejects with a 422 (send `html`/`text` instead). `send` and `batch.send` answer
 422 `all_recipients_suppressed` when every `to` recipient is on the suppression
-list or opted out of the send's `topic_id`. `get` includes a nullable
-best-practice `score` (0–10); `get_insights` returns the full per-check report
-behind it (404 `not_found` until insights exist).
+list or opted out of the send's `topic_id`. When the suppression list alone
+empties `to`, `send` also keeps a metadata-only `suppressed` email, which fires
+`email.suppressed`; each retry keeps another, even with the same idempotency
+key. `get` includes a nullable best-practice `score` (0–10); `get_insights`
+returns the full per-check report behind it (404 `not_found` until insights
+exist).
 
 `subject` takes up to 998 characters. A `to`, `cc` or `bcc` address on a domain
 that can never receive mail (`example.com`, `.test`, `.invalid`, `.localhost`,
@@ -792,16 +795,24 @@ ms.webhooks.delete(&hook.id).await?;
 `rotate` (MillionSend extension) mints or takes a new signing secret; until
 `previous_secret_expires_at` every delivery carries both signatures, so the
 receiver can switch at any point in the window. Subscribable event names
-include `email.*`, `deliverability.*`, `contact.created`/`updated`/`deleted`/
-`unsubscribed`/`resubscribed`/`topic_opt_in`/`topic_opt_out`,
-`suppression.added`/`removed`, `email.received`, and the opt-in inbox events
-`inbox.created`, `inbox.updated`, `inbox.deleted`, `inbox.expired`,
+include `email.*`, `deliverability.*`, `quota.*`, `contact.created`/`updated`/
+`deleted`/`unsubscribed`/`resubscribed`/`topic_opt_in`/`topic_opt_out`,
+`suppression.added`/`removed`, and the opt-in `email.prefetched` and inbox
+events `inbox.created`, `inbox.updated`, `inbox.deleted`, `inbox.expired`,
 `inbox.thread.created`, `inbox.thread.folder.updated`,
 `inbox.thread.labels.updated`, `inbox.email.received`, `inbox.email.sent`,
 `inbox.email.quarantined`, `inbox.draft.created`, `inbox.draft.updated`,
 `inbox.draft.sent` and `inbox.draft.deleted`, which reach an endpoint only when
 its `events` name them. Inbox events from sends made in the dashboard carry
 `data.source: "dashboard"`.
+
+`email.scheduled`, `email.failed` and `email.suppressed` need MillionSend
+v0.15.1 or later; an older server refuses a webhook naming them with 422
+`validation_error`. `email.failed` says why in `data.failed.reason`, and
+`email.suppressed` in `data.suppressed` (`type`, `message`, `reason`); treat
+their values as open sets. `suppression.added` and `suppression.removed` carry
+`data.source_id`, the email whose bounce or complaint created the entry (`null`
+otherwise).
 
 ### API keys
 
@@ -885,6 +896,7 @@ least:
 | `username`; inboxes that never expire by default; `emails.send` from a shared inbox; `name_review_unavailable`; `status_code`/`name` on contacts batch errors | v0.12.0 |
 | Newest-first lists; JSON 404 for unknown routes; `since` on `codes().latest`; `quarantined` on thread rows; 404 at once for an unknown `inbox_id`; `unread` with an inbox-scoped key | v0.13.0 |
 | The shared row of `domains.list` (`shared`, `sending_mode`, `sending_mode_reason`); `domain_id` on `inboxes.create`; `subject` up to 998 characters | v0.14.0 |
+| `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added`/`removed`; the `suppressed` email kept for an all-suppressed `emails.send` | v0.15.1 |
 
 ## Migrating from Resend
 
