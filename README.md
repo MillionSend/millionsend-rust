@@ -803,6 +803,12 @@ include `email.*`, `deliverability.*`, `contact.created`/`updated`/`deleted`/
 its `events` name them. Inbox events from sends made in the dashboard carry
 `data.source: "dashboard"`.
 
+`email.scheduled`, `email.failed` and `email.suppressed` need MillionSend
+v0.15.1 or later; an older server refuses a webhook naming them with 422
+`validation_error`. `email.failed` says why in `data.failed.reason`, and
+`email.suppressed` in `data.suppressed` (`type`, `message`, `reason`); treat
+their values as open sets.
+
 ### API keys
 
 ```rust
@@ -885,6 +891,7 @@ least:
 | `username`; inboxes that never expire by default; `emails.send` from a shared inbox; `name_review_unavailable`; `status_code`/`name` on contacts batch errors | v0.12.0 |
 | Newest-first lists; JSON 404 for unknown routes; `since` on `codes().latest`; `quarantined` on thread rows; 404 at once for an unknown `inbox_id`; `unread` with an inbox-scoped key | v0.13.0 |
 | The shared row of `domains.list` (`shared`, `sending_mode`, `sending_mode_reason`); `domain_id` on `inboxes.create`; `subject` up to 998 characters | v0.14.0 |
+| `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added`/`removed` | v0.15.1 |
 
 ## Migrating from Resend
 
