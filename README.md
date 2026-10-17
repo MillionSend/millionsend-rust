@@ -107,6 +107,10 @@ match ms.emails.get(&id).await {
 An unknown route answers 404 `not_found` (`application_error` from servers
 before v0.13.0). Match on `name` and `status_code`; messages may change.
 
+A quarantine release adds 403 `trust_not_allowed` and 409 `held_by_screening`,
+see [Inboxes](#inboxes-beta); it answers 403 `forbidden` and 503
+`screening_unavailable` only to MCP tokens.
+
 ### Retries
 
 The SDK never retries on its own. Worth retrying after `err.retry_after()`
@@ -298,8 +302,8 @@ default: screening, code extraction and send rules on) or for people
 use millionsend::{
     CreateInboxDraftOptions, CreateInboxLabelOptions, CreateInboxOptions, ForwardInThreadOptions,
     IdempotentTrait, InboxSafetyUpdate, LatestCodeOptions, ListInboxThreadsOptions,
-    ReleaseQuarantinedOptions, ReplyInThreadOptions, SearchInboxThreadsOptions,
-    UpdateInboxDraftOptions, UpdateInboxOptions, UpdateInboxThreadOptions,
+    ReplyInThreadOptions, SearchInboxThreadsOptions, UpdateInboxDraftOptions, UpdateInboxOptions,
+    UpdateInboxThreadOptions,
 };
 
 let inbox = ms.inboxes.create(&CreateInboxOptions {
@@ -347,9 +351,7 @@ ms.inboxes.codes().latest(&inbox.id, Some(&LatestCodeOptions {
 
 // Quarantine: held mail is kept and listed; agents see it only once a person releases it
 ms.inboxes.quarantine().list(&inbox.id, None).await?;
-ms.inboxes.quarantine().release(&inbox.id, &email_id, Some(&ReleaseQuarantinedOptions {
-    trust_sender: Some(true),                                      // also allowlists the sender
-})).await?;
+ms.inboxes.quarantine().release(&inbox.id, &email_id, None).await?;
 
 // Threads and their messages
 ms.inboxes.threads().list(&inbox.id, Some(&ListInboxThreadsOptions {
@@ -408,6 +410,14 @@ inbox-scoped key or an MCP token cannot send a draft that waits for approval
 (`approval_required`); a person in the dashboard or a full-access team key can.
 Resend's hosted agent settings (`/inboxes/:id/agent`) are not exposed:
 MillionSend runs no agent.
+
+On an agent inbox with `screening` on, mail held before screening ran
+(`not_allowlisted`, `unauthenticated_sender`, `failed_auth`) is screened at
+release when screening can run: if it finds prompt injection or phishing, the
+email stays held as `injection` or `phishing` (409 `held_by_screening`).
+`trust_sender: Some(true)` also adds the sender to the allowlist, only for mail
+held as `not_allowlisted` from a sender that authenticated (`sender_trust`
+`"external"`); anything else answers 403 `trust_not_allowed`.
 
 An inbox never expires unless `expires_in` says so, and its `name` takes up to
 320 characters. `domain_id` takes a `domains.list` row instead of
@@ -897,6 +907,7 @@ least:
 | Newest-first lists; JSON 404 for unknown routes; `since` on `codes().latest`; `quarantined` on thread rows; 404 at once for an unknown `inbox_id`; `unread` with an inbox-scoped key | v0.13.0 |
 | The shared row of `domains.list` (`shared`, `sending_mode`, `sending_mode_reason`); `domain_id` on `inboxes.create`; `subject` up to 998 characters | v0.14.0 |
 | `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added`/`removed`; the `suppressed` email kept for an all-suppressed `emails.send` | v0.15.1 |
+| Release rules: `trust_sender` only for a `not_allowlisted` hold from an authenticated sender (`trust_not_allowed`); screening at release (`held_by_screening`) | v0.16.0 |
 
 ## Migrating from Resend
 
