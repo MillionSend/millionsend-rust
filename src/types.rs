@@ -223,8 +223,8 @@ pub struct SendEmailOptions {
     pub scheduled_at: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub tags: Option<Vec<Tag>>,
-    /// Recipients opted out of the topic are skipped and an unsubscribe link
-    /// is added.
+    /// Recipients opted out of the topic are skipped. A send to one address
+    /// that is a contact also gets that contact's unsubscribe link.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub topic_id: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
