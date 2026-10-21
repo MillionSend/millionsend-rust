@@ -1312,6 +1312,49 @@ async fn contact_properties_cover_create_get_list_update_delete() {
 }
 
 #[tokio::test]
+async fn contact_properties_send_date_and_read_date_and_unknown_types() {
+    let server = MockServer::start().await;
+    let date = json!({
+        "object": "contact_property", "id": "p3", "key": "last_login", "type": "date",
+        "fallback_value": "2026-01-08", "created_at": "2026-01-01T00:00:00Z"
+    });
+    Mock::given(method("POST"))
+        .and(path("/contact-properties"))
+        .and(body_json(
+            json!({ "key": "last_login", "type": "date", "fallback_value": "2026-01-08" }),
+        ))
+        .respond_with(ok_json(date.clone()))
+        .mount(&server)
+        .await;
+    Mock::given(method("GET"))
+        .and(path("/contact-properties"))
+        .respond_with(ok_json(json!({
+            "object": "list", "has_more": false,
+            "data": [date, { "id": "p4", "key": "beta", "type": "boolean", "fallback_value": null,
+                             "created_at": "2026-01-01T00:00:00Z" }]
+        })))
+        .mount(&server)
+        .await;
+
+    let ms = MillionSend::with_base_url("ms_test", server.uri());
+    let created = ms
+        .contacts
+        .properties
+        .create(&CreateContactPropertyOptions {
+            key: "last_login".into(),
+            r#type: ContactPropertyType::Date,
+            fallback_value: Some(json!("2026-01-08")),
+        })
+        .await
+        .unwrap();
+    assert_eq!(created.r#type, ContactPropertyType::Date);
+    let list = ms.contacts.properties.list(None).await.unwrap();
+    assert_eq!(list.data[0].r#type, ContactPropertyType::Date);
+    assert_eq!(list.data[1].r#type, ContactPropertyType::Unknown);
+    assert!(serde_json::to_value(ContactPropertyType::Unknown).is_err());
+}
+
+#[tokio::test]
 async fn broadcasts_create_puts_every_field_on_the_wire() {
     let server = MockServer::start().await;
     Mock::given(method("POST"))

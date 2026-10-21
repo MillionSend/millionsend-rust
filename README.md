@@ -14,7 +14,7 @@ Async (`tokio` + `reqwest`). Every fallible call returns `Result<T, Error>`.
 
 ```toml
 [dependencies]
-millionsend = "0.9"
+millionsend = "0.10"
 tokio = { version = "1", features = ["macros", "rt-multi-thread"] }
 ```
 
@@ -506,7 +506,8 @@ ms.contacts.list(Some(&ListContactsOptions {
 ```
 
 `Contact.properties` values arrive as typed wrappers on the wire
-(`{ "type": "string", "value": "pro" }` / `{ "type": "number", "value": 3 }`).
+(`{ "type": "string", "value": "pro" }` / `{ "type": "number", "value": 3 }` /
+`{ "type": "date", "value": "2026-01-08" }`, a date's value being the text as stored).
 With `include`, each `ContactListItem` carries the same `properties` map and
 the same `topics` rows as `contacts.get` / `contacts.topics.list`; without it
 both are `None`. `segments.list_contacts` takes the same options.
@@ -605,6 +606,21 @@ ms.contacts.properties.update(&plan.id, &UpdateContactPropertyOptions {
 ms.contacts.properties.delete(&plan.id).await?;
 ```
 
+`type` is `String` or `Number`, as on Resend, or `Date` (MillionSend
+extension, needs MillionSend v0.22.0). A date property's values and
+`fallback_value` must read as a date, or the write answers 422
+`validation_error`:
+
+- an ISO 8601 date, such as `2026-01-08`, read as midnight UTC;
+- a date-time with `T` or a space, such as `2026-01-08T10:30:00Z` or
+  `2026-01-08 10:30`, read as UTC when it names no zone;
+- Unix time in seconds or milliseconds between 2000 and 2100, such as
+  `1767225600`.
+
+`ContactPropertyType` is `#[non_exhaustive]`: a type newer than this SDK reads
+as `ContactPropertyType::Unknown` instead of failing the call, so match it with
+a `_` arm.
+
 ### Topics
 
 ```rust
@@ -692,6 +708,21 @@ ms.segments.update(&id, &UpdateSegmentOptions {
 }).await?;
 ms.segments.delete(&id).await?;
 ```
+
+`created_at` and any property take four date ops: `before` and `after` with an
+ISO 8601 date or date-time, and `in_last_days` and `not_in_last_days` with a
+whole number of days as a string, from `"1"` to `"36500"`:
+
+```rust
+SegmentCondition {
+    field: "property:last_login".into(),
+    op: "not_in_last_days".into(),
+    value: Some("90".into()),
+}
+```
+
+A property's value reads as a date the way a `Date` property's values do,
+whatever its type, and one that isn't a date matches none of these ops.
 
 ### Suppressions
 
@@ -908,6 +939,7 @@ least:
 | The shared row of `domains.list` (`shared`, `sending_mode`, `sending_mode_reason`); `domain_id` on `inboxes.create`; `subject` up to 998 characters | v0.14.0 |
 | `email.scheduled`, `email.failed` and `email.suppressed` webhook events; `source_id` on `suppression.added`/`removed`; the `suppressed` email kept for an all-suppressed `emails.send` | v0.15.1 |
 | Release rules: `trust_sender` only for a `not_allowlisted` hold from an authenticated sender (`trust_not_allowed`); screening at release (`held_by_screening`) | v0.16.0 |
+| `ContactPropertyType::Date`; segment date ops on properties, and `in_last_days` / `not_in_last_days` on `created_at` | v0.22.0 |
 
 ## Migrating from Resend
 
@@ -936,7 +968,7 @@ Resource and method names match: `emails`, `batch`, `receiving`, `contacts`,
   server-side forward taking `ForwardReceivedEmailOptions`.
 - **MillionSend extensions** with no Resend counterpart: `segments`,
   `contacts.create_batch`, `contacts.batch_get`, `contacts.batch_remove`,
-  `contacts.preferences_link`,
+  `contacts.preferences_link`, `ContactPropertyType::Date`,
   `webhooks.rotate`, `deliverability`, `usage`, `emails.get_insights`, the
   receiving long-poll, `receiving.reply`/`delete`, `inboxes.safety()`,
   `codes()` and `quarantine()`, the `username` and `domain_id` of
