@@ -518,13 +518,25 @@ pub struct RemoveContactSegmentResponse {
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
 #[serde(rename_all = "snake_case")]
+#[non_exhaustive]
 pub enum ContactPropertyType {
     String,
     Number,
+    /// MillionSend extension (needs MillionSend v0.22.0). Values and the
+    /// fallback must read as a date, or the write answers 422
+    /// `validation_error`: an ISO 8601 date (`2026-01-08`, midnight UTC), a
+    /// date-time with `T` or a space (`2026-01-08T10:30:00Z`,
+    /// `2026-01-08 10:30`; UTC when it names no zone), or Unix time in seconds
+    /// or milliseconds between 2000 and 2100.
+    Date,
+    /// A type this SDK version does not know. Only ever read: serializing it
+    /// fails.
+    #[serde(other, skip_serializing)]
+    Unknown,
 }
 
 /// `fallback_value` is `Some(Value::Null)` to store an explicit null; its JSON
-/// type must match `type`.
+/// type must match `type`, and a `Date` fallback must read as a date.
 #[derive(Debug, Clone, Serialize)]
 pub struct CreateContactPropertyOptions {
     pub key: String,
@@ -649,8 +661,9 @@ pub struct Contact {
     pub last_name: Option<String>,
     pub created_at: String,
     pub unsubscribed: bool,
-    /// Each value is a typed wrapper on the wire: `{ "type": "string", "value": "…" }`
-    /// or `{ "type": "number", "value": 1 }`.
+    /// Each value is a typed wrapper on the wire: `{ "type": "string", "value": "…" }`,
+    /// `{ "type": "number", "value": 1 }` or, for a date property, the text as
+    /// stored: `{ "type": "date", "value": "2026-01-08" }`.
     #[serde(default)]
     pub properties: HashMap<String, serde_json::Value>,
 }
